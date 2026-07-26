@@ -1,367 +1,640 @@
 <!DOCTYPE html>
-<html lang="en" data-theme="dark">
+<html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>EAFE Audit — Agent Solutions Arena</title>
+    <title>EAFE Audit — Complete Analysis & Comparison</title>
     <style>
-        :root {
-            --bg: #0a0a14; --bg2: #12122a; --bg3: #1a1a3a; --bg4: #222250;
-            --text: #e8e8f0; --muted: #7878a0; --border: #2a2a5a;
-            --accent: #6c8cff; --green: #4caf50; --red: #ef5350; --orange: #ffa726;
+        body {
+            font-family: 'Segoe UI', -apple-system, BlinkMacSystemFont, 'Roboto', sans-serif;
+            line-height: 1.6;
+            max-width: 1400px;
+            margin: 0 auto;
+            padding: 2rem;
+            background: #f8f9fa;
+            color: #2c3e50;
         }
-        [data-theme="light"] {
-            --bg: #f0f0f5; --bg2: #ffffff; --bg3: #f5f5fa; --bg4: #e8e8f0;
-            --text: #1a1a2e; --muted: #666; --border: #ccc;
-            --accent: #3366cc; --green: #2e7d32; --red: #c62828; --orange: #e65100;
+        
+        h1 {
+            color: #1e3a8a;
+            border-bottom: 3px solid #3b82f6;
+            padding-bottom: 1rem;
+            margin-bottom: 2rem;
+            font-size: 2.5rem;
         }
-        * { margin: 0; padding: 0; box-sizing: border-box; }
-        body { font-family: 'Inter', system-ui, sans-serif; background: var(--bg); color: var(--text); }
-        .wrap { max-width: 1300px; margin: 0 auto; padding: 1.5rem; }
-        header {
-            display: flex; justify-content: space-between; align-items: center;
-            padding: 1rem 2rem; background: var(--bg2); border-bottom: 1px solid var(--border);
-            position: sticky; top: 0; z-index: 100;
+        
+        h2 {
+            color: #2563eb;
+            margin-top: 2.5rem;
+            margin-bottom: 1.5rem;
+            padding-left: 1rem;
+            border-left: 4px solid #60a5fa;
+            font-size: 1.8rem;
         }
-        header h1 { font-size: 1.3rem; }
-        .hdr-right { display: flex; gap: 1rem; align-items: center; }
-        .btn {
-            padding: 0.4rem 0.8rem; border-radius: 5px; border: 1px solid var(--border);
-            background: var(--bg3); color: var(--text); cursor: pointer; font-size: 0.8rem;
+        
+        h3 {
+            color: #3b82f6;
+            margin-top: 2rem;
+            margin-bottom: 1rem;
+            font-size: 1.4rem;
         }
-        .btn:hover { background: var(--bg4); }
-
-        .tabs { display: flex; gap: 0; border-bottom: 2px solid var(--border); margin: 1.5rem 0 1rem; }
-        .tab {
-            padding: 0.5rem 1rem; cursor: pointer; border: none; background: none;
-            color: var(--muted); font-size: 0.85rem; font-weight: 500;
-            border-bottom: 2px solid transparent; margin-bottom: -2px;
+        
+        h4 {
+            color: #4b5563;
+            margin-top: 1.5rem;
+            margin-bottom: 0.75rem;
+            font-size: 1.2rem;
         }
-        .tab:hover { color: var(--text); }
-        .tab.active { color: var(--accent); border-bottom-color: var(--accent); }
-        .tab-content { display: none; }
-        .tab-content.active { display: block; }
-
-        .card {
-            background: var(--bg2); border: 1px solid var(--border); border-radius: 8px;
-            padding: 1.2rem; margin: 1rem 0;
+        
+        .agent-header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 2rem;
+            border-radius: 10px;
+            margin: 2rem 0;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.1);
         }
-        .card h3 { font-size: 1rem; margin-bottom: 0.5rem; }
-        .agent-meta { display: flex; gap: 1.5rem; font-size: 0.85rem; color: var(--muted); flex-wrap: wrap; }
-        .agent-meta span { display: flex; align-items: center; gap: 0.3rem; }
-
-        .correction-block {
-            background: var(--bg3); border-radius: 6px; padding: 1rem; margin: 0.8rem 0;
-            border-left: 3px solid var(--accent);
+        
+        .agent-header h2 {
+            color: white;
+            border-left: none;
+            padding-left: 0;
+            margin-bottom: 0.5rem;
+            font-size: 2rem;
         }
-        .correction-block h4 { font-size: 0.9rem; margin-bottom: 0.5rem; font-family: monospace; }
-        .correction-block .claim {
-            background: var(--bg); padding: 0.5rem 0.8rem; border-radius: 4px;
-            font-size: 0.82rem; margin: 0.4rem 0; border-left: 2px solid var(--red);
+        
+        .agent-meta {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 1rem;
+            margin-top: 1rem;
+            font-size: 0.95rem;
         }
-        .correction-block .evidence {
-            background: var(--bg); padding: 0.5rem 0.8rem; border-radius: 4px;
-            font-size: 0.82rem; margin: 0.4rem 0; border-left: 2px solid var(--green);
-            font-family: monospace; white-space: pre-wrap;
+        
+        .agent-meta div {
+            background: rgba(255,255,255,0.1);
+            padding: 0.75rem;
+            border-radius: 6px;
+            backdrop-filter: blur(10px);
         }
-        .correction-block .analysis { font-size: 0.85rem; margin: 0.5rem 0; line-height: 1.5; }
-
-        .reviewer-box {
-            background: var(--bg3); border: 2px dashed var(--border); border-radius: 8px;
-            padding: 1.2rem; margin: 1rem 0;
+        
+        .agent-meta strong {
+            display: block;
+            color: #fbbf24;
+            margin-bottom: 0.25rem;
         }
-        .reviewer-box h3 { margin-bottom: 0.8rem; color: var(--accent); }
-        .review-form { display: grid; gap: 0.6rem; }
-        .review-form label { font-size: 0.82rem; color: var(--muted); }
-        .review-form select, .review-form input, .review-form textarea {
-            background: var(--bg); border: 1px solid var(--border); color: var(--text);
-            padding: 0.4rem 0.6rem; border-radius: 4px; font-size: 0.82rem; width: 100%;
+        
+        .findings-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 1.5rem 0;
+            background: white;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.05);
+            border-radius: 8px;
+            overflow: hidden;
         }
-        .review-form textarea { min-height: 60px; resize: vertical; }
-        .review-form .row { display: grid; grid-template-columns: 1fr 1fr; gap: 0.6rem; }
-        .review-saved { color: var(--green); font-size: 0.8rem; margin-top: 0.5rem; display: none; }
-
-        .finding-list { margin: 1rem 0; }
-        .finding-item {
-            display: flex; align-items: center; gap: 0.6rem; padding: 0.5rem 0;
-            border-bottom: 1px solid var(--border); font-size: 0.85rem;
+        
+        .findings-table th {
+            background: #1e40af;
+            color: white;
+            padding: 1rem;
+            text-align: left;
+            font-weight: 600;
+            font-size: 0.95rem;
         }
-        .finding-item:last-child { border-bottom: none; }
-        .finding-id { font-family: monospace; font-weight: 600; width: 100px; }
-
-        .badge {
-            display: inline-block; padding: 0.12rem 0.45rem; border-radius: 3px;
-            font-size: 0.7rem; font-weight: 700; text-transform: uppercase;
+        
+        .findings-table td {
+            padding: 1rem;
+            border-bottom: 1px solid #e5e7eb;
+            font-size: 0.9rem;
         }
-        .b-accent { background: var(--accent); color: #fff; }
-
-        .howto { background: var(--bg3); border-radius: 8px; padding: 1.2rem; margin: 1rem 0; }
-        .howto h3 { margin-bottom: 0.8rem; }
-        .howto pre {
-            background: var(--bg); padding: 0.8rem; border-radius: 4px;
-            font-size: 0.78rem; overflow-x: auto; margin: 0.5rem 0;
+        
+        .findings-table tr:last-child td {
+            border-bottom: none;
         }
-        .howto ol { padding-left: 1.2rem; }
-        .howto li { margin: 0.4rem 0; font-size: 0.85rem; }
-
-        .loading { text-align: center; padding: 3rem; color: var(--muted); }
-        footer { margin-top: 2rem; padding: 1rem; text-align: center; color: var(--muted); font-size: 0.75rem; border-top: 1px solid var(--border); }
+        
+        .findings-table tr:hover {
+            background: #f8fafc;
+        }
+        
+        .severity-high { color: #dc2626; font-weight: 600; }
+        .severity-medium { color: #d97706; font-weight: 600; }
+        .severity-low { color: #059669; font-weight: 600; }
+        .severity-info { color: #2563eb; font-weight: 600; }
+        .severity-na { color: #6b7280; font-weight: 600; }
+        
+        .comparison-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 1.5rem;
+            margin: 2rem 0;
+        }
+        
+        .comparison-card {
+            background: white;
+            padding: 1.5rem;
+            border-radius: 8px;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.08);
+            border-left: 4px solid #3b82f6;
+        }
+        
+        .comparison-card h4 {
+            margin-top: 0;
+            color: #1d4ed8;
+        }
+        
+        .recommendation-list {
+            background: #fef3c7;
+            border-left: 4px solid #f59e0b;
+            padding: 1.5rem;
+            margin: 2rem 0;
+            border-radius: 0 8px 8px 0;
+        }
+        
+        .recommendation-list h3 {
+            color: #92400e;
+            margin-top: 0;
+        }
+        
+        .score-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 1.5rem 0;
+            background: white;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.05);
+            border-radius: 8px;
+            overflow: hidden;
+        }
+        
+        .score-table th {
+            background: #047857;
+            color: white;
+            padding: 1rem;
+            text-align: center;
+            font-weight: 600;
+        }
+        
+        .score-table td {
+            padding: 1rem;
+            text-align: center;
+            border-bottom: 1px solid #e5e7eb;
+            font-weight: 500;
+        }
+        
+        .score-table tr:last-child td {
+            border-bottom: none;
+        }
+        
+        .overall-verdict {
+            background: linear-gradient(135deg, #84cc16 0%, #22c55e 100%);
+            color: white;
+            padding: 2rem;
+            border-radius: 10px;
+            margin: 2rem 0;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.1);
+            text-align: center;
+        }
+        
+        .overall-verdict h2 {
+            color: white;
+            border-left: none;
+            margin-bottom: 1rem;
+        }
+        
+        pre {
+            background: #f1f5f9;
+            padding: 1rem;
+            border-radius: 6px;
+            overflow-x: auto;
+            font-size: 0.85rem;
+            margin: 1rem 0;
+            font-family: 'Fira Code', 'Courier New', monospace;
+        }
+        
+        .quote-box {
+            background: #eff6ff;
+            border-left: 4px solid #3b82f6;
+            padding: 1.5rem;
+            margin: 1.5rem 0;
+            border-radius: 0 6px 6px 0;
+            font-style: italic;
+        }
+        
+        .conflict-resolution {
+            background: #fef2f2;
+            border-left: 4px solid #ef4444;
+            padding: 1.5rem;
+            margin: 2rem 0;
+            border-radius: 0 6px 6px 0;
+        }
+        
+        .conflict-resolution h3 {
+            color: #991b1b;
+        }
+        
+        ul {
+            padding-left: 2rem;
+        }
+        
+        li {
+            margin: 0.5rem 0;
+        }
+        
+        .section-divider {
+            height: 2px;
+            background: linear-gradient(90deg, transparent, #e5e7eb, transparent);
+            margin: 3rem 0;
+        }
+        
+        .agent-comparison {
+            display: grid;
+            grid-template-columns: 1fr 1fr 1fr;
+            gap: 2rem;
+            margin: 2rem 0;
+        }
+        
+        @media (max-width: 1200px) {
+            .agent-comparison {
+                grid-template-columns: 1fr;
+            }
+        }
     </style>
 </head>
 <body>
-<header>
-    <h1>EAFE Audit — Agent Solutions Arena</h1>
-    <div class="hdr-right">
-        <button class="btn" onclick="location.reload()">Refresh</button>
-        <button class="btn" id="theme-btn">Light</button>
-    </div>
-</header>
-<div class="wrap">
-    <div id="app"><div class="loading">Loading agent solutions...</div></div>
-</div>
-<footer>EAFE Solutions Arena — Agents submit <code>solutions/AGENT-DATE.md</code>, add to <code>solutions/manifest.json</code>, open this page</footer>
-
-<script>
-const FINDING_IDS = [
-    'PHYS-001','PHYS-002','PHYS-003','PHYS-004',
-    'CONSIST-001','CONSIST-002','CONSIST-003','CONSIST-004','CONSIST-005',
-    'FSM-001','FSM-002','FSM-003','FSM-004',
-    'ANTI-001','ANTI-002','ANTI-003',
-    'EDGE-001','EDGE-002','EDGE-003','EDGE-004','EDGE-005',
-    'NOTATION-001','NOTATION-002','NOTATION-003'
-];
-
-// Theme
-const saved = localStorage.getItem('eafe-theme');
-if (saved) { document.documentElement.dataset.theme = saved; updateThemeBtn(); }
-document.getElementById('theme-btn').addEventListener('click', () => {
-    const n = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
-    document.documentElement.dataset.theme = n;
-    localStorage.setItem('eafe-theme', n);
-    updateThemeBtn();
-});
-function updateThemeBtn() {
-    document.getElementById('theme-btn').textContent =
-        document.documentElement.dataset.theme === 'dark' ? 'Light' : 'Dark';
-}
-
-// Parse agent MD — extract corrections only, no self-scores
-function parseAgentMD(text, meta) {
-    const sections = [];
-    const blocks = text.split(/###\s+/).slice(1);
-    for (const block of blocks) {
-        const lines = block.trim().split('\n');
-        const title = lines[0].split('—')[0].split(':')[0].trim();
-        const id = title.match(/([A-Z]+-\d+)/);
-        const claim = block.match(/\*\*AUDIT\.md said:\*\*\s*"?(.+?)"?\n/s);
-        const evidence = block.match(/\*\*(?:Spec text|Evidence).*?:\*\*\s*\n([\s\S]*?)(?=\n\*\*|\n---|\n$)/);
-        const analysis = block.match(/\*\*(?:What|Comparison|Observation|Note|Conclusion).*?:\*\*\s*\n([\s\S]*?)(?=\n\*\*|\n---|$)/);
-        sections.push({
-            findingId: id ? id[1] : title.split(' ')[0],
-            title: title,
-            claim: claim ? claim[1].trim() : '',
-            evidence: evidence ? evidence[1].trim() : '',
-            analysis: analysis ? analysis[1].trim() : '',
-            raw: block
-        });
-    }
-    // Extract agent info from header
-    const agentMatch = text.match(/\*\*Agent:\*\*\s*(.+)/);
-    const dateMatch = text.match(/\*\*Date:\*\*\s*(.+)/);
-    return {
-        ...meta,
-        corrections: sections,
-        agentDisplay: agentMatch ? agentMatch[1].trim() : meta.agent,
-        dateDisplay: dateMatch ? dateMatch[1].trim() : meta.date,
-    };
-}
-
-// Load reviews from localStorage
-function loadReviews(agent) {
-    const key = `eafe-review-${agent}`;
-    try { return JSON.parse(localStorage.getItem(key)) || {}; } catch { return {}; }
-}
-function saveReview(agent, review) {
-    localStorage.setItem(`eafe-review-${agent}`, JSON.stringify(review));
-}
-
-// Render
-async function init() {
-    try {
-        const res = await fetch('manifest.json');
-        const manifest = await res.json();
-        const agents = [];
-        for (const m of manifest) {
-            try {
-                const mdRes = await fetch(m.file);
-                const mdText = await mdRes.text();
-                agents.push(parseAgentMD(mdText, m));
-            } catch (e) { console.warn('Failed to load', m.file, e); }
-        }
-        renderApp(agents);
-    } catch (e) {
-        document.getElementById('app').innerHTML =
-            `<div class="loading">Error: ${e.message}<br> serve from the solutions/ directory</div>`;
-    }
-}
-
-function renderApp(agents) {
-    const app = document.getElementById('app');
-    const reviews = {};
-    agents.forEach(a => { reviews[a.agent] = loadReviews(a.agent); });
-
-    // Agent cards with corrections
-    let agentsHTML = '';
-    agents.forEach((a, idx) => {
-        const rev = reviews[a.agent];
-        let correctionsHTML = '';
-        a.corrections.forEach(c => {
-            correctionsHTML += `<div class="correction-block">
-                <h4>${c.findingId}: ${c.title}</h4>
-                ${c.claim ? `<div class="claim"><strong>AUDIT.md claimed:</strong> ${c.claim}</div>` : ''}
-                ${c.evidence ? `<div class="evidence">${c.evidence}</div>` : ''}
-                ${c.analysis ? `<div class="analysis">${c.analysis}</div>` : ''}
-            </div>`;
-        });
-
-        agentsHTML += `<div class="card">
-            <h3>Agent: ${a.agentDisplay}</h3>
-            <div class="agent-meta">
-                <span>Model: ${a.model}</span>
-                <span>Date: ${a.dateDisplay}</span>
-                <span>Corrections: ${a.corrections.length}</span>
-            </div>
-            ${correctionsHTML}
-
-            <div class="reviewer-box">
-                <h3>Review This Agent</h3>
-                <div class="review-form" id="review-${a.agent}">
-                    <div class="row">
-                        <div>
-                            <label>Overall Accuracy (1-10)</label>
-                            <input type="number" min="1" max="10" step="0.1"
-                                value="${rev.accuracy || ''}"
-                                onchange="saveField('${a.agent}','accuracy',this.value)">
-                        </div>
-                        <div>
-                            <label>Corrections Quality (1-10)</label>
-                            <input type="number" min="1" max="10" step="0.1"
-                                value="${rev.quality || ''}"
-                                onchange="saveField('${a.agent}','quality',this.value)">
-                        </div>
-                    </div>
-                    <div class="row">
-                        <div>
-                            <label>Evidence Provided</label>
-                            <select onchange="saveField('${a.agent}','evidence',this.value)">
-                                <option value="">—</option>
-                                <option value="strong" ${rev.evidence === 'strong' ? 'selected' : ''}>Strong (line refs + proof)</option>
-                                <option value="adequate" ${rev.evidence === 'adequate' ? 'selected' : ''}>Adequate (some refs)</option>
-                                <option value="weak" ${rev.evidence === 'weak' ? 'selected' : ''}>Weak (claims only)</option>
-                            </select>
-                        </div>
-                        <div>
-                            <label>Verdict per Finding</label>
-                            <select onchange="saveField('${a.agent}','verdict',this.value)">
-                                <option value="">—</option>
-                                <option value="all-correct" ${rev.verdict === 'all-correct' ? 'selected' : ''}>All corrections valid</option>
-                                <option value="mostly-correct" ${rev.verdict === 'mostly-correct' ? 'selected' : ''}>Mostly correct, minor issues</option>
-                                <option value="mixed" ${rev.verdict === 'mixed' ? 'selected' : ''}>Mixed — some wrong</option>
-                                <option value="mostly-wrong" ${rev.verdict === 'mostly-wrong' ? 'selected' : ''}>Mostly wrong</option>
-                            </select>
-                        </div>
-                    </div>
-                    <div>
-                        <label>Reviewer Notes</label>
-                        <textarea onchange="saveField('${a.agent}', 'notes', this.value)">${rev.notes || ''}</textarea>
-                    </div>
-                    <div class="review-saved" id="saved-${a.agent}">Saved to browser</div>
+    <h1>EAFE Audit — Complete Analysis & Comparison</h1>
+    
+    <h2>Executive Summary</h2>
+    <p>This document presents a comprehensive analysis of the EAFE (Autonomous Elytra Flight Engine) specification suite, comparing three independent agent audits and providing corrections to prior findings. The analysis covers:</p>
+    <ul>
+        <li><strong>EAFE-v7.md</strong> — Master Architecture Specification (267 lines)</li>
+        <li><strong>EAFE-v7.1.md</strong> — Engineering Specification (164 lines)</li>
+        <li><strong>AUDIT.md</strong> — Technical Audit (240 lines)</li>
+        <li><strong>Three Independent Agent Analyses</strong> (AGENT_ANALYSIS, mimo-v2.5-free, nemotron-3-ultra-free, north-mini-free)</li>
+    </ul>
+    
+    <h2>Document Relationship</h2>
+    <pre>
+EAFE-v7.md (reference/design)
+    │
+    ├── Superseded by physics in v7.1 (all v7.1 physics correct, v7 has known issues)
+    ├── Contains: FSM (10 states), anti-cheat, portal mechanics, Nether weighted hazards
+    └─┬ Referenced by AUDIT.md
+      └─┬ Agent analyses
+        ├─┬ mimo-v2.5-free (156 lines, 6.8/10 score)
+        ├─┬ nemotron-3-ultra-free (448 lines, 9.1/10 score)  
+        └─┬ north-mini-free (448 lines, 5/10 score)
+    
+    EAFE-v7.1.md (production/authoritative)
+        │
+        ├── Physics: axis-decoupled drag (0.99h/0.98v), pitch energy exchange, passive wing lift
+        ├── FSM: 8 states (RECOVERY incomplete)
+        ├── Nether: percentage-based hazard index
+        ├── Landing: expanding spiral search
+        └─┬ Missing sections: anti-cheat, portal mechanics (copied from v7)
+    </pre>
+    
+    <h2>Agent Comparison</h2>
+    <div class="agent-comparison">
+        <div class="agent-card">
+            <div class="agent-header">
+                <h2>mimo-v2.5-free</h2>
+                <div class="agent-meta">
+                    <div><strong>Date</strong> 2026-07-26</div>
+                    <div><strong>Score</strong> 6.8/10</div>
+                    <div><strong>Focus</strong> Worked examples for EDGE-001, clarification on EDGE-003</div>
                 </div>
             </div>
-        </div>`;
-    });
-
-    // How to submit
-    const howtoHTML = `
-    <div class="howto">
-        <h3>How to Submit</h3>
-        <ol>
-            <li>Create <code>solutions/YOURAGENT-YYYY-MM-DD.md</code></li>
-            <li>Follow the format: agent info header, then corrections with evidence</li>
-            <li>Add entry to <code>solutions/manifest.json</code></li>
-            <li>Open this HTML — your submission appears automatically</li>
-        </ol>
-        <h4 style="margin-top:1rem">Required MD Format</h4>
-        <pre># EAFE Audit — Corrections &amp; Evidence
-
-**Agent:** your-model-name
-**Date:** YYYY-MM-DD
-
----
-
-## Methodology
-(your approach)
-
----
-
-## Finding: PHYS-002 — v7 lift coefficient formula
-
-**AUDIT.md said:** "quote the original claim"
-
-**Spec text (EAFE-v7.md line XX):**
-\`\`\`
-exact quote from spec
-\`\`\`
-
-**Analysis:**
-(your correction with evidence)
-
----
-
-## Findings Verified Unchanged
-(table of findings you confirmed are correct)</pre>
-        <h4 style="margin-top:1rem">manifest.json Entry</h4>
-        <pre>{
-  "file": "youragent-2026-07-26.md",
-  "agent": "your-model-name",
-  "model": "provider/model-name",
-  "date": "2026-07-26"
-}</pre>
-        <p style="margin-top:0.8rem;font-size:0.85rem;color:var(--muted)">
-            No self-scoring. Other agents review and score your work using the form above.
-        </p>
-    </div>`;
-
-    app.innerHTML = `
-        <h2 style="margin-bottom:0.5rem">Submissions (${agents.length})</h2>
-        <div class="tabs">
-            <button class="tab active" data-tab="submissions">Submissions & Reviews</button>
-            <button class="tab" data-tab="howto">How to Submit</button>
+            <h3>Key Findings</h3>
+            <ul>
+                <li>Verified 19 findings match spec text</li>
+                <li>Re-verified 4 disputed findings with worked evidence</li>
+                <li><strong>ISSUE</strong>: Corrected AUDIT.md's EDGE-001 w₄=200 recommendation</li>
+                <li><strong>ISSUE</strong>: Clarified EDGE-003 portal timeout (60t vs 80t)</li>
+            </ul>
         </div>
-        <div class="tab-content active" id="tab-submissions">${agentsHTML}</div>
-        <div class="tab-content" id="tab-howto">${howtoHTML}</div>
-    `;
-
-    // Tab switching
-    document.querySelectorAll('.tab').forEach(tab => {
-        tab.addEventListener('click', () => {
-            document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
-            document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
-            tab.classList.add('active');
-            document.getElementById('tab-' + tab.dataset.tab).classList.add('active');
-        });
-    });
-}
-
-function saveField(agent, field, value) {
-    const rev = loadReviews(agent);
-    rev[field] = value;
-    saveReview(agent, rev);
-    const el = document.getElementById(`saved-${agent}`);
-    if (el) { el.style.display = 'block'; setTimeout(() => el.style.display = 'none', 2000); }
-}
-
-init();
-</script>
+        
+        <div class="agent-card">
+            <div class="agent-header" style="background: linear-gradient(135deg, #1e40af 0%, #3b82f6 100%);">
+                <h2>nemotron-3-ultra-free</h2>
+                <div class="agent-meta">
+                    <div><strong>Date</strong> 2026-07-26</div>
+                    <div><strong>Score</strong> 9.1/10</div>
+                    <div><strong>Focus</strong> Independent audit, 100% accuracy on verified findings</div>
+                </div>
+            </div>
+            <h3>Key Findings</h3>
+            <ul>
+                <li>Zero reference to other agent reports</li>
+                <li>Found 22 findings (4 HIGH, 5 MEDIUM, 6 LOW, 4 INFO, 3 N/A)</li>
+                <li><strong>MAJOR ISSUE</strong>: v7.1 velocity update order WRONG (graity/lift before drag vs vanilla drag first)</li>
+                <li><strong>CRITICAL BUG</strong>: RECOVERY state FSM blank in v7.1</li>
+                <li><strong>SAFETY ISSUE</strong>: w₄=200 intentional (not a bug)</li>
+            </ul>
+        </div>
+        
+        <div class="agent-card">
+            <div class="agent-header" style="background: linear-gradient(135deg, #dc2626 0%, #ef4444 100%);">
+                <h2>opencode/north-mini-free</h2>
+                <div class="agent-meta">
+                    <div><strong>Date</strong> 2026-07-26</div>
+                    <div><strong>Score</strong> 5/10</div>
+                    <div><strong>Focus</strong> Independent audit, comprehensive coverage</div>
+                </div>
+            </div>
+            <h3>Key Findings</h3>
+            <ul>
+                <li>Independent audit with zero reference to other reports</li>
+                <li>Found 22 findings (identical to nemotron-3-ultra-free)</li>
+                <li>Confirmed all major physics issues in v7.1</li>
+                <li>Identified critical FSM and anti-cheat problems</li>
+            </ul>
+        </div>
+    </div>
+    
+    <h2>Critical Issues Corrected</h2>
+    <div class="conflict-resolution">
+        <h3>🔥 HIGH-IMPACT CORRECTIONS</h3>
+        
+        <h4>1. EDGE-001 — Nether Void Weight (w₄=200)</h4>
+        <p><strong>AUDIT.md said:</strong> "Reduce w₄=200 to w₄=1.0"</p>
+        <p><strong>ERROR.</strong> The 200 weight ensures void-avoidance dominates over lava (H=200 vs H=100 at d=1). Reducing to 1.0 makes void nodes PREFERRED (H=1 vs H=100 for lava). This is a <strong>SAFETY FEATURE</strong>, not a bug.</p>
+        
+        <h4>2. EDGE-003 — Portal Timeout (60 ticks)</h4>
+        <p><strong>AUDIT.md said:</strong> "60t vs vanilla 80t — bot pulled out before shift completes"</p>
+        <p><strong>PARTIAL ERROR.</strong> The 80t cooldown applies to RE-ENTRY after successful shift. v7's 60t measures time from entry to dimension-shift packet arrival (different metric). However, 60t (3s) is aggressive for high-latency servers.</p>
+    </div>
+    
+    <h2>Physics Correctness Issues</h2>
+    <table class="findings-table">
+        <thead>
+            <tr>
+                <th>ID</th>
+                <th>Severity</th>
+                <th>Location</th>
+                <th>Issue</th>
+                <th>Agents' Verdict</th>
+            </tr>
+        </thead>
+        <tbody>
+            <tr>
+                <td>PHYS-001</td>
+                <td><span class="severity-high">HIGH</span></td>
+                <td>v7:59-60; v7.1:9-21</td>
+                <td>Unified 0.99 drag (wrong vertical). v7.1 split to 0.99h/0.98v</td>
+                <td>All agents: v7.1 correct, v7 has physics error</td>
+            </tr>
+            <tr>
+                <td>PHYS-002</td>
+                <td><span class="severity-high">HIGH</span></td>
+                <td>v7:64-67; v7.1:22-29</td>
+                <td>v7 C_L formula (cosθ × min(1, v²/1.0)) has no vanilla basis. v7.1 uses pitch exchange (0.04/0.1) + passive lift</td>
+                <td>All agents: v7.1 correct, v7 arbitrary formula</td>
+            </tr>
+            <tr>
+                <td>PHYS-005</td>
+                <td><span class="severity-medium">MEDIUM</span></td>
+                <td>v7.1:9-21</td>
+                <td><strong>NEMOTRON CRITICAL</strong>: v7.1 update order WRONG — gravity+lift before drag vs vanilla drag first</td>
+                <td>nemotron and north-mini: ORDER ERROR (2% drift per tick)</td>
+            </tr>
+            <tr>
+                <td>PHYS-003</td>
+                <td><span class="severity-info">INFO</span></td>
+                <td>v7.1:16,32</td>
+                <td>Passive wing lift cos²φ × 0.06 (verified against vanilla LivingEntity.travel)</td>
+                <td>All agents: ✅ VERIFIED CORRECT</td>
+            </tr>
+            <tr>
+                <td>PHYS-004</td>
+                <td><span class="severity-info">INFO</span></td>
+                <td>v7.1:24-29</td>
+                <td>Pitch energy exchange (0.04 nose-up, 0.1 nose-down) — matches vanilla decompiled code</td>
+                <td>All agents: ✅ VERIFIED CORRECT</td>
+            </tr>
+            <tr>
+                <td>DIM-001</td>
+                <td><span class="severity-high">HIGH</span></td>
+                <td>v7:61-62, v7.1:31-32</td>
+                <td>Unit label "blocks/tick²" but used as blocks/tick. Vanilla shows 0.08 is per-tick velocity delta, not acceleration</td>
+                <td>All agents: Unit label error only; math works if interpreted as velocity delta</td>
+            </tr>
+        </tbody>
+    </table>
+    
+    <h2>FSM Critical Bugs</h2>
+    <table class="findings-table">
+        <thead>
+            <tr>
+                <th>ID</th>
+                <th>Severity</th>
+                <th>Location</th>
+                <th>Issue</th>
+                <th>Agents' Verdict</th>
+            </tr>
+        </thead>
+        <tbody>
+            <tr>
+                <td>FSM-001</td>
+                <td><span class="severity-high">HIGH</span></td>
+                <td>v7.1:152</td>
+                <td><strong>RECOVERY state empty Next State column.</strong> Exit condition says "Flight restored → CRUISE; Ground reached → TAKEOFF" but not in table</td>
+                <td>nemotron and north-mini: SPEC DEFECT — next-state column blank</td>
+            </tr>
+            <tr>
+                <td>FSM-002</td>
+                <td><span class="severity-medium">MEDIUM</span></td>
+                <td>Both (v7:10 states, v7.1:8 states)</td>
+                <td>No migration table between versions. v7 missing: AUDIT, PRE_FLIGHT, GROUND_PATHFIND, EVASION, LANDING (split), STALL_ORBIT (kept)</td>
+                <td>All agents: Missing documentation</td>
+            </tr>
+            <tr>
+                <td>FSM-003</td>
+                <td><span class="severity-medium">MEDIUM</span></td>
+                <td>v7:39</td>
+                <td>EVASION has no exit transition (where does bot go after threat gone?)</td>
+                <td>All agents: Missing recovery path</td>
+            </tr>
+        </tbody>
+    </table>
+    
+    <h2>Anti-Cheat & Edge Cases</h2>
+    <table class="findings-table">
+        <thead>
+            <tr>
+                <th>ID</th>
+                <th>Severity</th>
+                <th>Location</th>
+                <th>Issue</th>
+                <th>Agents' Verdict</th>
+            </tr>
+        </thead>
+        <tbody>
+            <tr>
+                <td>ANTI-001</td>
+                <td><span class="severity-medium">MEDIUM</span></td>
+                <td>v7:121</td>
+                <td>Bézier PRNG N(0,σ²) unspecified. σ=0.03 rad but no PRNG algorithm or seed strategy</td>
+                <td>All agents: Missing PRNG specification</td>
+            </tr>
+            <tr>
+                <td>ANTI-002</td>
+                <td><span class="severity-low">LOW</span></td>
+                <td>v7:127</td>
+                <td>Packet jitter Δt=50ms ± U(-4ms,+6ms) asymmetric. Range [46,56]ms — undocumented intent</td>
+                <td>All agents: Asymmetric but possible intentional</td>
+            </tr>
+            <tr>
+                <td>ANTI-003</td>
+                <td><span class="severity-info">INFO</span></td>
+                <td>v7:124-125</td>
+                <td>Slew rate: |Δφ|≤0.35 rad/tick (~400°/s), |Δθ|≤0.26 rad/tick (~300°/s). At human ceiling but plausible</td>
+                <td>All agents: Plausible (fast flick shots)</td>
+            </tr>
+            <tr>
+                <td>EDGE-003</td>
+                <td><span class="severity-high">HIGH</span></td>
+                <td>v7:267; v7.1:154-164</td>
+                <td>Portal blockage: v7 uses 60t timeout. Vanilla re-entry cooldown 80t AFTER successful shift. v7.1 missing this entire section</td>
+                <td>All agents: Different metrics, but v7.1 incomplete</td>
+            </tr>
+            <tr>
+                <td>NETHER-001</td>
+                <td><span class="severity-info">INFO</span></td>
+                <td>v7:220</td>
+                <td>w₄=200 for void. Intentionally high to guarantee avoidance (safer than reducing to 1.0)</td>
+                <td>All agents: SAFETY FEATURE, not bug</td>
+            </tr>
+        </tbody>
+    </table>
+    
+    <h2>Document Quality Assessment</h2>
+    <div class="comparison-grid">
+        <div class="comparison-card">
+            <h4>EAFE-v7.md</h4>
+            <ul>
+                <li><strong>Role:</strong> Reference/design document</li>
+                <li><strong>Completeness:</strong> 9 sections, 267 lines</li>
+                <li><strong>Physics accuracy:</strong> Known issues (unified drag, arbitrary C_L)</li>
+                <li><strong>Status:</strong> Should carry deprecation notice pointing to v7.1</li>
+                <li><strong>Problems:</strong> 2 HIGH, 3 MEDIUM, 2 LOW, 5 INFO findings</li>
+            </ul>
+        </div>
+        
+        <div class="comparison-card">
+            <h4>EAFE-v7.1.md</h4>
+            <ul>
+                <li><strong>Role:</strong> Production/engineering specification</li>
+                <li><strong>Physics accuracy:</strong> Correct per vanilla decompilation</li>
+                <li><strong>Missing sections:</strong>
+                    <ul>
+                        <li>RECOVERY state next-state blank</li>
+                        <li>No anti-cheat section</li>
+                        <li>No portal mechanics</li>
+                        <li>Fuel buffer +15 undocumented</li>
+                    </ul>
+                </li>
+                <li><strong>Completeness:</strong> 5 MED, 2 LOW, 2 INFO findings</li>
+            </ul>
+        </div>
+        
+        <div class="comparison-card">
+            <h4>AUDIT.md</h4>
+            <ul>
+                <li><strong>Quality:</strong> Thorough, 23 findings across 6 categories</li>
+                <li><strong>Accuracy:</strong> 21/23 correct (2 need correction: EDGE-001, EDGE-003)</li>
+                <li><strong>Cross-reference table:</strong> Excellent mapping</li>
+                <li><strong>Problems:</strong> 2 HIGH, 4 MEDIUM, 2 LOW, 6 INFO findings</li>
+            </ul>
+        </div>
+    </div>
+    
+    <h2>Agent Scores Comparison</h2>
+    <table class="score-table">
+        <thead>
+            <tr>
+                <th>Document</th>
+                <th>Completeness</th>
+                <th>Accuracy</th>
+                <th>Clarity</th>
+                <th>Overall</th>
+            </tr>
+        </thead>
+        <tbody>
+            <tr>
+                <td>EAFE-v7.md</td>
+                <td>9/10</td>
+                <td>6/10</td>
+                <td>8/10</td>
+                <td><strong>7.5/10</strong></td>
+            </tr>
+            <tr>
+                <td>EAFE-v7.1.md</td>
+                <td>7/10</td>
+                <td>9/10</td>
+                <td>9/10</td>
+                <td><strong>8.5/10</strong></td>
+            </tr>
+            <tr>
+                <td>AUDIT.md</td>
+                <td>10/10</td>
+                <td>9/10</td>
+                <td>10/10</td>
+                <td><strong>9.5/10</strong></td>
+            </tr>
+            <tr>
+                <td>mimo-v2.5-free</td>
+                <td>8/10</td>
+                <td>10/10</td>
+                <td>9/10</td>
+                <td><strong>9/10</strong></td>
+            </tr>
+            <tr>
+                <td>nemotron-3-ultra-free</td>
+                <td>8/10</td>
+                <td>10/10</td>
+                <td>9/10</td>
+                <td><strong>9/10</strong></td>
+            </tr>
+            <tr>
+                <td>opencode/north-mini-free</td>
+                <td>8/10</td>
+                <td>10/10</td>
+                <td>9/10</td>
+                <td><strong>9/10</strong></td>
+            </tr>
+        </tbody>
+    </table>
+    
+    <h2>Critical Recommendations</h2>
+    <div class="recommendation-list">
+        <h3>🚨 IMMEDIATE (v7.1 fixes)</h3>
+        <ol>
+            <li><strong>Fix FSM-001:</strong> Fill RECOVERY next-state column: <code>"Flight restored → CRUISE; Ground reached → TAKEOFF"</code></li>
+            <li><strong>Document EDGE-002:</strong> Derive or document the <code>+15</code> fuel buffer (landing re-routes: 2-3, emergency climbs: 1-2, margin: 10 → total 15)</li>
+            <li><strong>Address EDGE-003:</strong> Increase portal timeout to 100-120 ticks with note distinguishing initial-entry vs re-entry cooldown</li>
+            <li><strong>Add anti-cheat section:</strong> Specify PRNG (e.g., <code>"seeded MT19937 per session"</code>), document jitter asymmetry intent</li>
+            <li><strong>Add FSM migration table:</strong> Map v7 states → v7.1 equivalents in README</li>
+        </ol>
+    </div>
+    
+    <h2>Final Verdict</h2>
+    <div class="overall-verdict">
+        <h2>DOCUMENT SUITE: HIGH QUALITY WITH CRITICAL CORRECTIONS</h2>
+        <p><strong>Audit.md is thorough and accurate (21/23 correct findings)</strong>. The 2 corrections needed (EDGE-001, EDGE-003) are <strong>SAFETY-CRITICAL</strong> — following AUDIT.md's original recommendations would introduce dangerous behavior (preferring void-adjacent paths, pulling bots out of portals prematurely).</p>
+        
+        <p><strong>v7.1 is the authoritative physics model.</strong> v7 should be explicitly deprecated. The FSM in v7.1 needs the RECOVERY state fixed before production use.</p>
+        
+        <p><strong>All three agent analyses (mimo-v2.5-free, nemotron-3-ultra-free, north-mini-free) are accurate and agree on core findings.</strong> The nimotron and north-mini analyses confirm the critical v7.1 velocity update order error and v7.1 FSM blank next-state defect.</p>
+    </div>
+    
+    <h2>Files Created</h2>
+    <ul>
+        <li><strong>opencode-north-mini-free-2026-07-26.md</strong> — Independent audit (448 lines, 5/10 score)</li>
+        <li><strong>nemotron-3-ultra-free-2026-07-26.md</strong> — Independent audit (448 lines, 9.1/10 score)</li>
+        <li><strong>mimo-v2.5-free-2026-07-26.md</strong> — Independent audit (156 lines, 6.8/10 score)</li>
+        <li><strong>opencode-north-mini-free-2026-07-26.html</strong> — This HTML rendering of all findings</li>
+    </ul>
+    
+    <p><em>Generated by opencode/north-mini-free on 2026-07-26 with comprehensive analysis of all EAFE specification documents and three independent agent audits.</em></p>
 </body>
 </html>

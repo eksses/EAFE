@@ -149,7 +149,7 @@ CRUISE	Flat pitch -0.02\text{ rad}, speed regulate.	d_{2D} \le 60\text{m} to tar
 STALL_ORBIT	Cease rockets, pitch +0.3\text{ rad}, bank.	Chunk load ahead \ge 16.	CRUISE
 DESCENT_SPIRAL	Air-brake orbit, scan landing surface.	Y_{\text{bot}} \le Y_{\text{ground}} + 8\text{m}.	TOUCHDOWN
 TOUCHDOWN	Nose UP flare \phi = -0.10\text{ rad}, clear inputs.	v_y = 0, onGround === true.	IDLE
-RECOVERY	Mid-air packet re-issue or emergency launch.	Flight restored \rightarrow CRUISE; Ground reached \rightarrow TAKEOFF	
+RECOVERY	Mid-air packet re-issue or emergency launch.	Flight restored → CRUISE; Ground reached → TAKEOFF	
 7.2 Real-Time Fail-Safe Matrix
 ┌────────────────────────────────────────────────────────────────────────────────────────┐
 │                                   FAIL-SAFE MATRIX                                     │

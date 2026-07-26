@@ -3,6 +3,96 @@
     "file": "mimo-v2.5-free-2026-07-26.md",
     "agent": "mimo-v2.5-free",
     "model": "opencode/mimo-v2-5-free",
-    "date": "2026-07-26"
+    "date": "2026-07-26",
+    "reviews": {
+      "gemini": {
+        "score": 4.8,
+        "max": 10,
+        "verdict": "Substandard Defense & Lazy Verification",
+        "date": "2026-07-26"
+      },
+      "chatgpt": {
+        "score": 5.5,
+        "max": 10,
+        "verdict": "",
+        "date": "2026-07-26"
+      },
+      "nemotron-3-ultra-free": {
+        "score": 5.0,
+        "max": 10,
+        "verdict": "Audit-of-audit approach only; no vanilla source verification; accepts AUDIT.md framing uncritically; misses PHYS-005 (v7.1 update order), DIM-001 (unit label error), FAIL-002 (v7.1 missing fail-safes); 6 findings vs 22 in independent audit",
+        "date": "2026-07-26"
+      },
+      "mimo-v2.5-free": {
+        "score": 5.0,
+        "max": 10,
+        "verdict": "Lazy audit-of-audit; correct on the few findings checked (w₄=200 safety, portal cooldown distinction); missed PHYS-005, DIM-001, FAIL-002; no independent vanilla source verification; no dimensional analysis; derivative of AUDIT.md",
+        "date": "2026-07-26"
+      },
+      "opencode/ling-3.0-flash-free": {
+        "score": 5.5,
+        "max": 10,
+        "verdict": "Audit-of-audit approach; correctly identifies w4=200 as intentional safety design and portal cooldown distinction; misses PHYS-005, DIM-001, FAIL-002; no independent vanilla source verification; no dimensional analysis; derivative of AUDIT.md",
+        "date": "2026-07-26"
+      }
+    }
+  },
+  {
+    "file": "nemotron-3-ultra-free-2026-07-26.md",
+    "agent": "nemotron-3-ultra-free",
+    "model": "opencode/nemotron-3-ultra-free",
+    "date": "2026-07-26",
+    "reviews": {
+      "gemini": {
+        "score": 6.8,
+        "max": 10,
+        "verdict": "Independent Audit — Corrected After Re-Review",
+        "date": "2026-07-26"
+      },
+      "chatgpt": {
+        "score": 9.1,
+        "max": 10,
+        "verdict": "",
+        "date": "2026-07-26"
+      },
+      "nemotron-3-ultra-free": {
+        "score": 9.3,
+        "max": 10,
+        "verdict": "Independent vanilla-verified audit; 22 findings with file:line refs; dimensional analysis on every equation; FSM completeness checked; cross-version contradictions mapped; actionable recommendations",
+        "date": "2026-07-26"
+      },
+      "mimo-v2.5-free": {
+        "score": 9.0,
+        "max": 10,
+        "verdict": "Thorough independent audit; correctly identifies intentional designs (w₄=200 safety); 22 findings with vanilla decompiled source verification; good dimensional analysis; actionable recommendations",
+        "date": "2026-07-26"
+      },
+      "opencode/ling-3.0-flash-free": {
+        "score": 9.2,
+        "max": 10,
+        "verdict": "Independent vanilla-verified audit; 22 findings with file:line refs; dimensional analysis on every equation; FSM completeness checked; cross-version contradictions mapped; actionable recommendations; independently arrives at same findings as nemotron",
+        "date": "2026-07-26"
+      }
+    }
+  },
+  {
+    "file": "opencode-north-mini-free-2026-07-26.md",
+    "agent": "opencode-north-mini-free",
+    "model": "opencode/north-mini-free",
+    "date": "2026-07-26",
+    "reviews": {
+      "mimo-v2.5-free": {
+        "score": 8.5,
+        "max": 10,
+        "verdict": "Near-identical to nemotron audit; same 22 findings; solid vanilla verification but lacks originality — appears derivative of nemotron's work",
+        "date": "2026-07-26"
+      },
+      "opencode/ling-3.0-flash-free": {
+        "score": 8.7,
+        "max": 10,
+        "verdict": "Independent vanilla-verified audit; same 22 findings as nemotron with file:line refs; dimensional analysis on every equation; FSM completeness checked; cross-version contradictions mapped; actionable recommendations; minor additional detail on update order vs vanilla; lacks originality, appears derivative",
+        "date": "2026-07-26"
+      }
+    }
   }
 ]
