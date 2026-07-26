@@ -1263,7 +1263,10 @@ All sections reviewed. No sections skipped.
 
     // Theme toggle
     const saved = localStorage.getItem('eafe-theme');
-    if (saved) document.documentElement.dataset.theme = saved;
+    if (saved) {
+        document.documentElement.dataset.theme = saved;
+        document.getElementById('theme-toggle').textContent = saved === 'dark' ? 'Light' : 'Dark';
+    }
 
     document.getElementById('theme-toggle').addEventListener('click', () => {
         const html = document.documentElement;
@@ -1277,26 +1280,32 @@ All sections reviewed. No sections skipped.
         }
     });
 
-    // Init
-    mermaid.initialize({ startOnLoad: false, theme: 'dark' });
-    renderContent('v7');
+    // Init — wait for deferred KaTeX scripts to load
+    function initApp() {
+        mermaid.initialize({ startOnLoad: false, theme: 'dark' });
+        renderContent('v7');
 
-    // Scroll spy for TOC
-    const observer = new IntersectionObserver((entries) => {
-        entries.forEach(entry => {
-            const link = document.querySelector('#toc a[href="#' + entry.target.id + '"]');
-            if (link) {
-                if (entry.isIntersecting) {
-                    document.querySelectorAll('#toc a').forEach(a => a.classList.remove('active'));
-                    link.classList.add('active');
+        // Scroll spy for TOC
+        const observer = new IntersectionObserver((entries) => {
+            entries.forEach(entry => {
+                const link = document.querySelector('#toc a[href="#' + entry.target.id + '"]');
+                if (link) {
+                    if (entry.isIntersecting) {
+                        document.querySelectorAll('#toc a').forEach(a => a.classList.remove('active'));
+                        link.classList.add('active');
+                    }
                 }
-            }
-        });
-    }, { rootMargin: '-80px 0px -80% 0px' });
+            });
+        }, { rootMargin: '-80px 0px -80% 0px' });
 
-    setTimeout(() => {
         document.querySelectorAll('#content h2, #content h3').forEach(h => observer.observe(h));
-    }, 100);
+    }
+
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', initApp);
+    } else {
+        initApp();
+    }
     </script>
 </body>
 </html>
