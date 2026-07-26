@@ -12,8 +12,10 @@
 |----------|-------|
 | HIGH     | 2     |
 | MEDIUM   | 5     |
-| LOW      | 5     |
-| **Total**| **12**|
+| LOW      | 9     |
+| INFO     | 6     |
+| N/A      | 1     |
+| **Total**| **23**|
 
 v7.1 supersedes v7 on all physics-correctness issues. v7 appears to be a reference/design document; v7.1 is the production-grade spec. The main risks are: (1) the two versions diverge without explicit cross-reference, (2) the RECOVERY FSM state in v7.1 has no defined next-state, and (3) anti-cheat Bézier PRNG is unspecified.
 
