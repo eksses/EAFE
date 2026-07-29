@@ -1,27 +1,25 @@
 'use strict';
 /**
- * EAFE v7.5 — Directional Opening Awareness & Curve Flight Engine
+ * EAFE v7.6 — Precise Pathfinding Block Digging Specification
  * =========================================================================
  * Enhancements:
- *   1. Directional Opening Awareness (findBestLaunchHeading):
+ *   1. Pathfinding Block Digging (Strictly En-Route Only):
+ *      - Does NOT dig out the standing launch area.
+ *      - Only breaks blocks when walking/pathfinding to a launch spot if a block
+ *        blocks its walking path (canDig = true in mineflayer-pathfinder).
+ *   2. Directional Opening Awareness (findBestLaunchHeading):
  *      - Scans target direction first. If target direction is blocked, scans all 8
- *        compass directions (West, North, East, South, NW, SW, NE, SE).
- *      - If an open opening exists in any direction (e.g. West 270°), takes off
- *        facing that open direction immediately!
- *   2. In-Flight Curve Turning:
- *      - Takes off facing the open corridor (e.g. West) to clear terrain.
- *      - Once airborne and reaching safety altitude (Y ≥ 100m), smoothly turns yaw
- *        towards the destination (TARGET_X, TARGET_Z) in mid-air!
- *   3. Obstacle Block Breaking (clearObstructingBlocks):
- *      - Breaks blocking leaves/wood/dirt before deciding to relocate.
- *   4. Pathfinder Block Digging & Jumping (mineflayer-pathfinder):
- *      - Digs & jumps to reach open spot only when 1000% confirmed no opening exists.
- *   5. Strict Firework Audit BEFORE Launch:
+ *        compass directions (West 270°, North, East, South, NW, SW, NE, SE).
+ *      - Takes off facing whichever direction has an open corridor (e.g. West).
+ *   3. In-Flight Curve Turning:
+ *      - Takes off facing open corridor (e.g. West) to clear terrain.
+ *      - Once airborne and Y ≥ 95m, smoothly turns yaw towards destination in mid-air.
+ *   4. Strict Firework Audit BEFORE Launch:
  *      - Calculates N_req = ceil(d2d/68.5) + ceil(ΔY/28.0) + 15.
  *      - Aborts & asks in chat if rockets are insufficient.
- *   6. Spatial Clearance Checkmark (spatialClear = true):
+ *   5. Spatial Clearance Checkmark (spatialClear = true):
  *      - Bypasses re-pathfinding on retries when spatial clearance is approved.
- *   7. Preserved Flight Core (UNTOUCHED):
+ *   6. Preserved Flight Core (UNTOUCHED):
  *      - 150ms Jump Apex Rule Takeoff.
  *      - Pitch angles: +0.65=UP (Climb), +0.05=LEVEL (Cruise), -0.30=DOWN (Landing).
  *      - Smart rocket conservation (skips firing when ||v|| ≥ 1.4 b/t).
@@ -48,8 +46,7 @@ const MAX_RETRIES = 3;    // retries before giving up
 const PHASE = {
   IDLE:       'IDLE',
   AUDIT:      'AUDIT',        // pre-flight inventory, fuel & spatial audit
-  CLEARING:   'CLEARING',     // breaking blocking blocks to clear runway
-  RELOCATING: 'RELOCATING',   // A* pathfinding & block-digging to open launch spot
+  RELOCATING: 'RELOCATING',   // A* pathfinding & block-digging en route to open launch spot
   TAKEOFF:    'TAKEOFF',      // 150ms jump apex + elytraFly()
   CLIMBING:   'CLIMBING',     // nose up (+0.65), gaining altitude
   CRUISING:   'CRUISING',     // level (+0.05), heading to target
@@ -261,7 +258,7 @@ function createBot() {
   }
 
   // ─────────────────────────────────────────────────────────────────────────
-  //  DIRECTIONAL OPENING AWARENESS & SPATIAL ENVELOPE (EAFE v7.5)
+  //  DIRECTIONAL OPENING AWARENESS & SPATIAL ENVELOPE (EAFE v7.6)
   // ─────────────────────────────────────────────────────────────────────────
 
   /**
@@ -273,7 +270,7 @@ function createBot() {
     // Overhead Column (Y+1 to Y+5)
     for (let dy = 1; dy <= 5; dy++) {
       const b = bot.blockAt(pos.offset(0, dy, 0));
-      if (!isAir(b)) return { clear: false, reason: `Overhead blocked at Y+${dy} (${b?.name})`, block: b };
+      if (!isAir(b)) return { clear: false, reason: `Overhead blocked at Y+${dy} (${b?.name})` };
     }
 
     // Forward Runway at specified yaw (4m ahead, Y+1 & Y+2)
@@ -284,15 +281,15 @@ function createBot() {
       for (let dy = 1; dy <= 2; dy++) {
         const bPos = pos.offset(Math.round(dirX * d), dy, Math.round(dirZ * d));
         const b = bot.blockAt(bPos);
-        if (!isAir(b)) return { clear: false, reason: `Runway blocked at ${d}m ahead (Y+${dy}: ${b?.name})`, block: b };
+        if (!isAir(b)) return { clear: false, reason: `Runway blocked at ${d}m ahead (Y+${dy}: ${b?.name})` };
       }
     }
 
     // Ground check: not liquid
     const blockUnder = bot.blockAt(pos.offset(0, -0.5, 0));
-    if (isWaterOrLava(blockUnder)) return { clear: false, reason: `Standing in liquid (${blockUnder?.name})`, block: null };
+    if (isWaterOrLava(blockUnder)) return { clear: false, reason: `Standing in liquid (${blockUnder?.name})` };
 
-    return { clear: true, reason: 'Clear corridor', block: null };
+    return { clear: true, reason: 'Clear corridor' };
   }
 
   /**
@@ -305,7 +302,7 @@ function createBot() {
     // 1. Direct Target Heading
     const targetCheck = checkRunwayDirection(targetYaw);
     if (targetCheck.clear) {
-      return { yaw: targetYaw, headingName: 'Direct Target', clear: true, block: null };
+      return { yaw: targetYaw, headingName: 'Direct Target', clear: true };
     }
 
     // 2. Scan 8 Compass Directions for open launch corridors
@@ -327,40 +324,11 @@ function createBot() {
         try {
           bot.chat(`[EAFE] 🧭 Target heading blocked — taking off facing ${dir.name} then turning to goal!`);
         } catch(_) {}
-        return { yaw: dir.yaw, headingName: dir.name, clear: true, block: null };
+        return { yaw: dir.yaw, headingName: dir.name, clear: true };
       }
     }
 
-    return { yaw: targetYaw, headingName: 'Blocked', clear: false, block: targetCheck.block };
-  }
-
-  /**
-   * Attempt to BREAK obstructing blocks to clear launch space
-   */
-  async function clearObstructingBlocks() {
-    setPhase(PHASE.CLEARING, 'Attempting to break obstructing blocks to clear launch space...');
-
-    for (let attempt = 0; attempt < 5; attempt++) {
-      const heading = findBestLaunchHeading();
-      if (heading.clear) return heading;
-
-      const b = heading.block;
-      if (b && b.diggable && !isWaterOrLava(b)) {
-        console.log(`[EAFE] ⛏ Breaking obstructing block (${b.name}) at (${b.position.x}, ${b.position.y}, ${b.position.z})...`);
-        try { bot.chat(`[EAFE] ⛏ Breaking blocking ${b.name} to clear launch space...`); } catch(_) {}
-        try {
-          await bot.dig(b);
-          await sleep(200);
-        } catch(e) {
-          console.warn('[EAFE] Dig failed:', e.message);
-          break;
-        }
-      } else {
-        break;
-      }
-    }
-
-    return findBestLaunchHeading();
+    return { yaw: targetYaw, headingName: 'Blocked', clear: false };
   }
 
   function findElevatedOpenSpot() {
@@ -408,12 +376,16 @@ function createBot() {
     return best;
   }
 
+  /**
+   * Pathfind to target launch spot using mineflayer-pathfinder (A* search)
+   * WITH CAN_DIG = TRUE: Breaks any block blocking its walking path to the launch spot!
+   */
   async function pathfindToSpot(tx, ty, tz) {
-    console.log(`[EAFE] 🗺 Pathfinding & digging path to safe launch spot (${tx}, ${ty}, ${tz})...`);
+    console.log(`[EAFE] 🗺 Pathfinding & breaking path blocks to launch spot (${tx}, ${ty}, ${tz})...`);
 
     const defaultMove = new Movements(bot);
-    defaultMove.canDig = true;             // BREAK BLOCKS EN ROUTE!
-    defaultMove.allow1by1tunnels = true;  // Dig tunnels if needed
+    defaultMove.canDig = true;             // BREAK BLOCKS EN ROUTE TO DESTINATION!
+    defaultMove.allow1by1tunnels = true;  // Dig 1x1/1x2 tunnels if path is blocked
     defaultMove.allowParkour = true;      // Jump over gaps & up ledges
     defaultMove.canSwim = false;          // NO WATER
     defaultMove.liquidCost = 100;         // HIGH PENALTY FOR LIQUIDS
@@ -487,16 +459,10 @@ function createBot() {
       let heading = findBestLaunchHeading();
       console.log(`[EAFE] Directional Opening Scan: clear=${heading.clear} heading=${heading.headingName}`);
 
-      // If blocked, try breaking obstructing blocks FIRST!
-      if (!heading.clear && heading.block?.diggable) {
-        console.log(`[EAFE] Obstructing block detected (${heading.block.name}) — attempting to break...`);
-        heading = await clearObstructingBlocks();
-      }
-
-      // ONLY if still blocked in ALL directions, relocate with pathfinder!
+      // If blocked in all 8 directions, pathfind to an open launch spot (breaking path blocks en route!)
       if (!heading.clear) {
-        console.log('[EAFE] 1000% Confirmed all 8 launch headings blocked — pathfinding to open spot...');
-        try { bot.chat('[EAFE] ⚠ Launch blocked in all directions — pathfinding to open spot...'); } catch(_) {}
+        console.log('[EAFE] Launch blocked in all 8 headings — pathfinding to open launch spot...');
+        try { bot.chat('[EAFE] ⚠ Launch blocked in all directions — pathfinding to open launch spot...'); } catch(_) {}
 
         const spot = findElevatedOpenSpot();
         if (!spot) {
@@ -505,7 +471,7 @@ function createBot() {
           return;
         }
 
-        setPhase(PHASE.RELOCATING, `Pathfinding & digging to open spot (${spot.x}, ${spot.y}, ${spot.z}) on ${spot.blockName}`);
+        setPhase(PHASE.RELOCATING, `Pathfinding to open spot (${spot.x}, ${spot.y}, ${spot.z}) on ${spot.blockName}`);
         const arrived = await pathfindToSpot(spot.x, spot.y, spot.z);
         if (!arrived) {
           setPhase(PHASE.FAILED, '✗ Could not pathfind to launch spot');
@@ -543,7 +509,6 @@ function createBot() {
       try { bot.setControlState(k, false); } catch(_) {}
     });
 
-    // Face the selected launch heading (e.g. West) + NOSE UP (+0.5 rad)
     lookForce(activeLaunchYaw, 0.5);
 
     // Jump
@@ -617,7 +582,6 @@ function createBot() {
       const pos = bot.entity.position;
       const targetYaw = yawTo(TARGET_X, TARGET_Z);
 
-      // MID-AIR YAW CURVE: Once Y >= 95m (above trees & obstacles), smoothly curve yaw towards goal!
       let currentYaw = activeLaunchYaw;
       if (pos.y >= 95) {
         currentYaw = targetYaw; // Lock onto destination in mid-air!
@@ -934,11 +898,11 @@ function createBot() {
 
 // ─── BANNER ──────────────────────────────────────────────────────────────────
 console.log('╔═════════════════════════════════════════════════════════════╗');
-console.log('║  EAFE v7.5 — Directional Opening Awareness & Curve Flight    ║');
+console.log('║  EAFE v7.6 — Precise Pathfinding Digging Specification      ║');
 console.log('║  Opening Scan: Evaluates target + 8 compass headings (W,N,E,S)║');
+console.log('║  Pathfinder Digging: Breaks path blocks strictly en-route   ║');
 console.log('║  Curved Flight: Takes off in open corridor, turns in sky    ║');
-console.log('║  Block Digging: Breaks blocking leaves/wood/dirt before rel ║');
-console.log('║  Pathfinder: A* search with canDig=true & allowParkour=true ║');
+console.log('║  Fuel: N_req Calculation BEFORE flight, asks if short       ║');
 console.log(`║  Host: ${HOST}:${PORT}`.padEnd(61) + '║');
 console.log('╚═════════════════════════════════════════════════════════════╝');
 
