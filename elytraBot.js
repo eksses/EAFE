@@ -1,16 +1,17 @@
 'use strict';
 /**
- * EAFE v10.13 — Land-Mass Score Engine & Center Landing Spot Selection
+ * EAFE v10.14 — Nearest Land-Mass Geometric Center Landing Engine
  * ====================================================================================
  * Enhancements:
- *   1. Contiguous Land-Mass Score Engine (getLandAreaScore & findSafeLandingSpotAround):
- *      - Scans an 11x11 block surrounding grid (121 blocks) for every candidate landing spot.
- *      - Rejects 1-block or 2-block isolated ledges, small platforms, and edges floating near water.
- *      - Calculates contiguous solid safe land density and AUTOMATICALLY SELECTS THE CENTER OF THE
- *        LARGEST CONTINUOUS SAFE LAND MASS!
- *   2. Edge-Stuck & Ledge Hover Impulse Failsafe (startLanding):
- *      - If the bot is hovering over liquid or near a ledge edge (dist > 1.5m, Y < 65m), fires an
- *        impulse boost directly toward the CENTER of the solid land platform to pull the bot away from edges.
+ *   1. Nearest Land-Mass Geometric Center Landing Engine (findLandMassCenter & findSafeLandingSpotAround):
+ *      - Locates the CLOSEST solid safe land mass to the goal coordinates (never landing far away).
+ *      - Maps the 2D bounding box (up to 15 blocks in all 4 directions) of that land mass to calculate its
+ *        EXACT GEOMETRIC CENTROID:
+ *          midX = (minX + maxX) / 2
+ *          midZ = (minZ + maxZ) / 2
+ *      - Targets (midX, midZ) so the bot ALWAYS lands in the exact middle of solid land, away from all edges!
+ *   2. Edge-Stuck & Ledge Hover Impulse Failsafe:
+ *      - Fires impulse rockets toward the center of the land mass if hovering near ledges/liquid at low alt.
  *   3. Touchdown Recognition Failsafe & Hazard Block Classification:
  *      - Instantly detects touchdown on solid non-hazard blocks, stopping timers and logging arrival cleanly.
  *
@@ -1080,68 +1081,82 @@ function createBot() {
   // ─────────────────────────────────────────────────────────────────────────
 
   /**
-   * Helper function: Computes the contiguous solid land score around (x, z)
-   * Scans a surrounding square of radius 5 blocks (11x11 block area = 121 blocks)
+   * Calculates the geometric CENTER of the solid land mass around (anchorX, anchorZ).
+   * Scans bounding box of the land mass and returns the exact middle coordinate (centerX, centerZ)
+   * away from all edges!
    */
-  function getLandAreaScore(centerX, centerZ, radius = 5) {
-    let solidCount = 0;
-    for (let dx = -radius; dx <= radius; dx++) {
-      for (let dz = -radius; dz <= radius; dz++) {
-        const b = getGroundBlockAt(centerX + dx, centerZ + dz);
-        if (b && isSafeSolidBlock(b)) {
-          solidCount++;
-        }
-      }
+  function findLandMassCenter(anchorX, anchorZ) {
+    let minX = anchorX, maxX = anchorX;
+    let minZ = anchorZ, maxZ = anchorZ;
+
+    const maxBound = 15; // Scan up to 15 blocks in 4 directions to map land boundaries
+
+    for (let dx = 1; dx <= maxBound; dx++) {
+      const b = getGroundBlockAt(anchorX - dx, anchorZ);
+      if (b && isSafeSolidBlock(b)) minX = anchorX - dx;
+      else break;
     }
-    return solidCount;
+    for (let dx = 1; dx <= maxBound; dx++) {
+      const b = getGroundBlockAt(anchorX + dx, anchorZ);
+      if (b && isSafeSolidBlock(b)) maxX = anchorX + dx;
+      else break;
+    }
+    for (let dz = 1; dz <= maxBound; dz++) {
+      const b = getGroundBlockAt(anchorX, anchorZ - dz);
+      if (b && isSafeSolidBlock(b)) minZ = anchorZ - dz;
+      else break;
+    }
+    for (let dz = 1; dz <= maxBound; dz++) {
+      const b = getGroundBlockAt(anchorX, anchorZ + dz);
+      if (b && isSafeSolidBlock(b)) maxZ = anchorZ + dz;
+      else break;
+    }
+
+    const midX = Math.round((minX + maxX) / 2);
+    const midZ = Math.round((minZ + maxZ) / 2);
+
+    const midBlock = getGroundBlockAt(midX, midZ);
+    if (midBlock && isSafeSolidBlock(midBlock)) {
+      return { x: midX, z: midZ, blockName: midBlock.name, safe: true };
+    }
+
+    const anchorBlock = getGroundBlockAt(anchorX, anchorZ);
+    return { x: anchorX, z: anchorZ, blockName: anchorBlock?.name || 'stone', safe: true };
   }
 
   /**
-   * Scans expanding concentric rings up to detected server render distance (blocks)
-   * across real-time loaded chunks to locate the LARGEST CONTINUOUS SOLID SAFE LAND SURFACE,
-   * targeting the CENTER of the largest land mass so the bot never lands on tiny ledges!
+   * Locates the CLOSEST solid safe land mass to (centerX, centerZ) and targets the
+   * GEOMETRIC CENTER of that land mass (never landing on edges or far away)!
    */
   function findSafeLandingSpotAround(centerX, centerZ) {
     const rDist = getServerRenderDistance();
     const maxSearchRadius = rDist.blocks; // Use real-time detected server view radius!
 
-    let bestSpot = null;
-    let bestScore = -1;
-
-    // Check direct center target first
+    // 1. Check direct center target first
     const directGround = getGroundBlockAt(centerX, centerZ);
     if (directGround && isSafeSolidBlock(directGround)) {
-      const score = getLandAreaScore(centerX, centerZ, 5);
-      bestSpot = { x: centerX, z: centerZ, blockName: directGround.name, safe: true, score: score };
-      bestScore = score;
-      // If direct target is in the middle of a massive land area (>= 90/121 solid), accept immediately!
-      if (score >= 90) return bestSpot;
+      const centerSpot = findLandMassCenter(centerX, centerZ);
+      console.log(`[EAFE] 🏝 Direct target land found — landing at Land-Mass Center (${centerSpot.x}, ${centerSpot.z}) [${centerSpot.blockName}]`);
+      return centerSpot;
     }
 
-    // Dynamic Expanding Archimedean Search up to maxSearchRadius across loaded chunks
-    for (let r = 2; r <= maxSearchRadius; r += 4) {
+    // 2. Search outward for the NEAREST solid safe land mass (closest to goal!)
+    for (let r = 2; r <= maxSearchRadius; r += 2) {
       const stepAngle = Math.max(Math.PI / 12, Math.PI / (r * 0.5));
       for (let angle = 0; angle < Math.PI * 2; angle += stepAngle) {
         const sx = Math.round(centerX + r * Math.cos(angle));
         const sz = Math.round(centerZ + r * Math.sin(angle));
         const sb = getGroundBlockAt(sx, sz);
         if (sb && isSafeSolidBlock(sb)) {
-          const score = getLandAreaScore(sx, sz, 5);
-          if (score > bestScore) {
-            bestScore = score;
-            bestSpot = { x: sx, z: sz, blockName: sb.name, safe: true, score: score };
-          }
+          // Found nearest land mass! Calculate its exact geometric center!
+          const centerSpot = findLandMassCenter(sx, sz);
+          console.log(`[EAFE] 🏝 Nearest land mass found ${r}m from goal — targeting Land-Mass Center (${centerSpot.x}, ${centerSpot.z}) [${centerSpot.blockName}]`);
+          return centerSpot;
         }
       }
     }
 
-    if (bestSpot && bestScore >= 9) { // Require at least a 3x3 solid land area minimum
-      console.log(`[EAFE] 🏝 Found optimal center landing spot at (${bestSpot.x}, ${bestSpot.z}) [${bestSpot.blockName}] with Land-Mass Score ${bestScore}/121`);
-      return bestSpot;
-    }
-
-    if (bestSpot) return bestSpot;
-    return { x: centerX, z: centerZ, blockName: 'unknown', safe: false, score: 0 };
+    return { x: centerX, z: centerZ, blockName: 'unknown', safe: false };
   }
 
   /**
