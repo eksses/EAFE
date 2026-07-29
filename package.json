@@ -63,7 +63,8 @@
   "files": [
     "src/",
     "README.md",
-    "AGENTS.md"
+    "AGENTS.md",
+    "LICENSE"
   ],
   "devDependencies": {
     "npm-run-all2": "^9.0.3",
