@@ -2,7 +2,7 @@ const mineflayer = require('mineflayer');
 const { ElytraFlight } = require('@eksses/eafe');
 
 const bot = mineflayer.createBot({
-  host: '103.151.60.212',
+  host: 'localhost',
   port: 25565,
   username: 'test',
 });
