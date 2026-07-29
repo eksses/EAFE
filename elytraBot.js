@@ -1,19 +1,18 @@
 'use strict';
 /**
- * EAFE v10.7 — Parallel Lawnmower Grid Search Engine (Boustrophedon Pattern)
+ * EAFE v10.8 — ReferenceError Fix & Smooth Takeoff Kinetic Energy Protection
  * ====================================================================================
  * Enhancements:
- *   1. Parallel Lawnmower Grid Sweep (startWanderScan):
- *      - Replaced 4-sided box turning (which created U-turn loops on the 3rd turn) with long
- *        PARALLEL TRACK SWEEPS (North -> Shift 128m East -> South -> Shift 128m East -> North).
- *      - Flies 300m long parallel straight tracks across the ocean, with each track spaced
- *        exactly 1 render distance width apart (128m).
- *      - 100% systematic ocean coverage with ZERO U-turn box overlap!
- *   2. 10% Backtrack Limit Rule for Safe Coastline Fallback:
- *      - The bot ONLY turns back to a known safe coastline (lastKnownSafeGround) if the distance
- *        to turn back is <= 10% of the total flight distance (e.g. <= 50m for a 500m trip)!
- *   3. Goal-Location First Ocean Search & Remaining Rocket Announcement:
- *      - Scans goal location first, and reports remaining fireworks on arrival.
+ *   1. Fixed ReferenceError: gridDirIndex is not defined:
+ *      - Replaced leftover gridDirIndex with sweepDirection in startWanderScan().
+ *   2. Takeoff Kinetic Energy Protection & Smooth Pitch Ramping:
+ *      - Ramps pitch smoothly (0.45 -> 0.65 rad) on launch to build upward momentum smoothly
+ *        without hitting overhead structures or taking kinetic energy damage.
+ *      - Added 5-tick (1.0s) ground packet grace period during climb to prevent false ground-contact fails.
+ *   3. Parallel Lawnmower Grid Search Engine (Boustrophedon Pattern):
+ *      - Flies 300m parallel straight tracks across the ocean, shifting 128m East between sweeps.
+ *   4. 10% Backtrack Limit Rule & Goal-First Search:
+ *      - Only turns back if safe coast is within 10% of total trip distance; otherwise wanders and scans.
  *
  * Commands: f [X Z], setgoal X Z, m fast/med/low, s, status, audit.
  */
@@ -878,7 +877,10 @@ function createBot() {
   function startClimb() {
     setPhase(PHASE.CLIMBING, `Climbing to Y=${CRUISE_ALT}...`);
 
-    lookForce(activeLaunchYaw, 0.65);
+    let climbTicks = 0;
+    const launchPosY = bot.entity.position.y;
+
+    lookForce(activeLaunchYaw, 0.45); // Start with smooth 0.45 pitch on initial climb
     fireRocketDirect();
 
     if (rocketLoop) clearInterval(rocketLoop);
@@ -891,6 +893,7 @@ function createBot() {
     climbLoop = setInterval(() => {
       if (phase !== PHASE.CLIMBING) { clearInterval(climbLoop); climbLoop = null; return; }
 
+      climbTicks++;
       const pos = bot.entity.position;
       const targetYaw = yawTo(activeTargetX, activeTargetZ);
 
@@ -910,7 +913,7 @@ function createBot() {
       }
 
       // Dynamic Render Distance Raycast Scan (Throttled log)
-      let climbPitch = 0.65;
+      let climbPitch = (climbTicks <= 4) ? 0.45 : 0.65; // Ramp pitch smoothly from 0.45 to 0.65
       const terrainScan = scanFullRenderDistance(currentYaw, climbPitch);
       if (terrainScan.hit) {
         if (Date.now() - lastTerrainWarn > 3000) {
@@ -925,7 +928,8 @@ function createBot() {
 
       lookForce(currentYaw, climbPitch);
 
-      if (bot.entity.onGround && pos.y < CRUISE_ALT - 10) {
+      // Grace Period Failsafe: Ignore transient ground packets during first 1.0s (5 ticks) unless bot actually fell below launch height
+      if (bot.entity.onGround && pos.y < CRUISE_ALT - 10 && climbTicks > 5 && (pos.y < launchPosY - 2.0)) {
         clearInterval(climbLoop); climbLoop = null;
         clearInterval(rocketLoop); rocketLoop = null;
         setPhase(PHASE.FAILED, '✗ Unexpected ground contact during climb');
@@ -1105,9 +1109,10 @@ function createBot() {
 
     setPhase(PHASE.WANDER_SCAN, `🌊 Ocean LZ detected — forcing EFFICIENT Mode & climbing to dynamic scan altitude Y=${targetScanAlt} (RenderDist: ${rDist.chunks}ch / ${rDist.blocks}m)...`);
 
-    gridDirIndex  = 0; // Start facing North (0)
-    gridLegLength = 1;
-    legStartPos   = bot.entity.position.clone();
+    sweepDirection = 0; // Start facing North (0)
+    lawnState      = 'SWEEP';
+    trackCount     = 1;
+    legStartPos    = bot.entity.position.clone();
     scannedChunks.clear();
 
     if (flyLoop) clearInterval(flyLoop);
