@@ -1,18 +1,19 @@
 'use strict';
 /**
- * EAFE v9.9 — High-Altitude Ocean Wander & Scan Engine (WANDER_SCAN Phase)
- * ============================================================================
- * Resolution for Low-Altitude Water Hovering:
- *   If no solid ground is found at destination (ocean / sea / water body):
- *     1. CANCEL LOW-ALTITUDE LANDING IMMEDIATELY — stops rocket burning at Y=75.
- *     2. CLIMB TO OPTIMAL SCANNING ALTITUDE (Y=120m): Ascends to Y=120 to maximize
- *        render distance chunk visibility across the ocean floor and surface.
- *     3. HIGH-ALTITUDE WANDER & SCAN (WANDER_SCAN Phase): Orbits/wanders outwards while
- *        scanning loaded chunks for any solid land (islands, shores, mainland, obsidian, etc.).
- *     4. LAND UPON DISCOVERY: Once solid land is detected, re-routes landing trajectory
- *        and lands safely on the discovered shore/island!
+ * EAFE v10.0 — Dynamic Server Render Distance Detection Engine & Failsafe Scanner
+ * =================================================================================
+ * Real-Time Render Distance Calibration:
+ *   - Automatically detects the server's real-time view distance (4, 6, 8, 10, 12, 16 chunks)
+ *     by auditing loaded chunk column memory (bot.world.getColumns()).
+ *   - Dynamically calculates:
+ *       1. Active View Radius (blocks = chunks * 16). E.g., 4 chunks = 64m, 6 chunks = 96m.
+ *       2. Optimal Scan Altitude: Y_scan = clamp(62 + blocks * 0.6, 95, 160).
+ *          For 4 chunks -> Y=100m, 6 chunks -> Y=120m, 8 chunks -> Y=138m.
+ *       3. Dynamic Raycast Limit = viewRadius (prevents scanning beyond server visibility).
+ *       4. Dynamic Orbit Step = viewRadius * 0.8 (ensures zero coverage gaps in ocean searches).
  *
  * Core Failsafes:
+ *   - High-Altitude Ocean Wander & Scan: Cancels Y=75 low hover over water, climbs to Y_scan.
  *   - Unconditional Landing & Wander Reserve (N_wander_landing = 12 rockets).
  *   - True Pitch-and-Glide Rocket Saver Mode (EFFICIENT = 150m/rocket).
  *   - Dual Console Terminal & In-Game Chat Commands: f [X Z], setgoal X Z, m fast/med/low, s, status, audit.
@@ -32,7 +33,6 @@ const USERNAME   = 'test';
 const DEFAULT_TARGET_X = 100;
 const DEFAULT_TARGET_Z = 100;
 const CRUISE_ALT       = 180;   // Safe target cruise altitude (Y=180)
-const SCAN_ALT         = 120;   // Optimal render-distance ocean scan altitude (Y=120)
 const MAX_RETRIES      = 3;     // retries before giving up
 
 // ─── FLIGHT MODES ────────────────────────────────────────────────────────────
@@ -65,7 +65,7 @@ const PHASE = {
   TAKEOFF:     'TAKEOFF',      // 150ms jump apex + elytraFly() + instant off-hand rocket
   CLIMBING:    'CLIMBING',     // continuous nose up (+0.65 to +0.75), gaining altitude
   CRUISING:    'CRUISING',     // level (+0.05), heading to target
-  WANDER_SCAN: 'WANDER_SCAN',  // High-altitude (Y=120) ocean wander & render-distance land scan
+  WANDER_SCAN: 'WANDER_SCAN',  // High-altitude ocean wander & render-distance land scan
   DEAD_STICK:  'DEAD_STICK',   // unpowered glide cruise (0 rockets remaining)
   LANDING:     'LANDING',      // Archimedean spiral & surface glide (-0.30)
   FAILED:      'FAILED',       // flight failed, auto-retry scheduled
@@ -155,6 +155,39 @@ function createBot() {
     const line = `[EAFE] [${p}] ${msg || ''}`;
     console.log(line);
     try { bot.chat(line.substring(0, 256)); } catch(_) {}
+  }
+
+  // ─── REAL-TIME SERVER RENDER DISTANCE ENGINE ────────────────────────────────
+  /**
+   * Dynamically measures the server's real-time render/view distance in chunks and blocks!
+   * Audits loaded chunk column memory in bot.world.
+   */
+  function getServerRenderDistance() {
+    if (!bot.entity || !bot.world) return { chunks: 6, blocks: 96, scanAlt: 120 };
+
+    const bX = Math.floor(bot.entity.position.x) >> 4;
+    const bZ = Math.floor(bot.entity.position.z) >> 4;
+    let maxDistChunks = 0;
+
+    try {
+      const columns = bot.world.getColumns();
+      for (const col of columns) {
+        if (!col) continue;
+        const dx = Math.abs(col.chunkX - bX);
+        const dz = Math.abs(col.chunkZ - bZ);
+        const dist = Math.max(dx, dz);
+        if (dist > maxDistChunks) maxDistChunks = dist;
+      }
+    } catch(_) {}
+
+    // Clamp detected render distance between 4 and 16 chunks
+    const chunks = Math.min(Math.max(maxDistChunks, 4), 16);
+    const blocks = chunks * 16;
+
+    // Calculate optimal scanning altitude: Y_scan = clamp(62 + blocks * 0.6, 95, 160)
+    const scanAlt = Math.min(Math.max(Math.round(62 + blocks * 0.6), 95), 160);
+
+    return { chunks, blocks, scanAlt };
   }
 
   // ─── Inventory & Off-Hand Firework Equipment ────────────────────────────────
@@ -307,7 +340,14 @@ function createBot() {
 
   /**
    * Empirically Verified Firework Fuel Calculation
-   * N_req = N_distance + N_climb + N_retry_waste + N_wander_landing
+   * Formula:
+   *   N_req = N_distance + N_climb + N_retry_waste + N_wander_landing
+   * where:
+   *   N_distance       = ceil(d2D / fuelDistDivider) (FAST: 35.0, MEDIUM: 70.0, EFFICIENT: 150.0)
+   *   N_climb          = ceil(|ΔY| / 10.0)
+   *   N_retry_waste    = (MAX_RETRIES * 3) = 9 rockets
+   *   N_wander_landing = 12 rockets (UNCONDITIONALLY reserved for arrival chunk scan,
+   *                      wander & descent flares)
    */
   function calculateRequiredRockets(d2d, deltaY) {
     const dReq = Math.ceil(d2d / currentMode.fuelDistDivider);
@@ -388,15 +428,18 @@ function createBot() {
   }
 
   // ─────────────────────────────────────────────────────────────────────────
-  //  128m FULL RENDER DISTANCE RAYCAST & SPATIAL SCAN
+  //  DYNAMIC RENDER DISTANCE RAYCAST & SPATIAL SCAN
   // ─────────────────────────────────────────────────────────────────────────
 
   /**
-   * 128m (8 chunk) Full Render Distance Trajectory Raycast
+   * Raycast along flight vector up to active server render distance!
    */
   function scanFullRenderDistance(yaw, currentPitch) {
     const pos = bot.entity.position;
     const eyePos = pos.offset(0, 1.6, 0);
+
+    const rDist = getServerRenderDistance();
+    const maxRaycastBlocks = rDist.blocks; // Raycast up to detected server render distance
 
     const cosPitch = Math.cos(currentPitch);
     const sinPitch = Math.sin(currentPitch);
@@ -404,7 +447,7 @@ function createBot() {
     const dirY =  sinPitch;
     const dirZ =  Math.cos(yaw) * cosPitch;
 
-    for (let d = 1; d <= 128; d += 2) {
+    for (let d = 1; d <= maxRaycastBlocks; d += 2) {
       const checkPos = eyePos.offset(dirX * d, dirY * d, dirZ * d);
       const b = bot.blockAt(checkPos);
       if (b && !isAir(b) && !isWaterOrLava(b)) {
@@ -412,7 +455,7 @@ function createBot() {
       }
     }
 
-    return { hit: false, dist: 128, block: null, pos: null };
+    return { hit: false, dist: maxRaycastBlocks, block: null, pos: null };
   }
 
   /**
@@ -573,7 +616,8 @@ function createBot() {
       return;
     }
 
-    setPhase(PHASE.AUDIT, `Running pre-flight inventory, fuel & spatial audit [Mode: ${currentMode.name}] to (${activeTargetX}, ${activeTargetZ})...`);
+    const rDist = getServerRenderDistance();
+    setPhase(PHASE.AUDIT, `Running pre-flight inventory, fuel & spatial audit [Mode:${currentMode.name} RenderDist:${rDist.chunks}ch/${rDist.blocks}m] to (${activeTargetX}, ${activeTargetZ})...`);
 
     // 1. Best Elytra auto-swap audit
     const elytraOk = await auditAndEquipElytra();
@@ -593,7 +637,7 @@ function createBot() {
 
     const elytraInfo = getElytraSummary();
     console.log(
-      `[EAFE] 🎆 Pre-Flight Audit [Mode=${currentMode.name} Target=(${activeTargetX}, ${activeTargetZ})]: ` +
+      `[EAFE] 🎆 Pre-Flight Audit [Mode=${currentMode.name} Target=(${activeTargetX}, ${activeTargetZ}) RenderDist=${rDist.chunks}ch]: ` +
       `Rockets=${rocketsAvail}/${reqRockets} | Elytra Durability=${elytraInfo.equippedDur}/432 (${elytraInfo.count} available)`
     );
 
@@ -743,7 +787,7 @@ function createBot() {
         currentYaw = targetYaw;
       }
 
-      // 128m Full Render Distance Raycast Scan (Throttled log)
+      // Dynamic Render Distance Raycast Scan (Throttled log)
       let climbPitch = 0.65;
       const terrainScan = scanFullRenderDistance(currentYaw, climbPitch);
       if (terrainScan.hit) {
@@ -819,7 +863,7 @@ function createBot() {
 
       let cruisePitch = (phase === PHASE.DEAD_STICK) ? 0.02 : currentMode.pitch;
 
-      // 128m Full Render Distance Raycast Scan (Throttled log)
+      // Dynamic Render Distance Raycast Scan (Throttled log)
       const terrainScan = scanFullRenderDistance(yaw, cruisePitch);
       if (terrainScan.hit && terrainScan.dist < 60) {
         if (Date.now() - lastTerrainWarn > 3000) {
@@ -881,21 +925,24 @@ function createBot() {
   }
 
   // ─────────────────────────────────────────────────────────────────────────
-  //  HIGH-ALTITUDE OCEAN WANDER & RENDER-DISTANCE LAND SCAN ENGINE
+  //  DYNAMIC SERVER RENDER DISTANCE HIGH-ALTITUDE OCEAN WANDER SCAN ENGINE
   // ─────────────────────────────────────────────────────────────────────────
 
   /**
-   * Scans expanding concentric rings from r = 1m to r = 128m around (centerX, centerZ)
-   * across real-time loaded chunks to locate nearest solid safe land surface (grass, stone, dirt, wood, etc.).
+   * Scans expanding concentric rings up to detected server render distance (blocks)
+   * across real-time loaded chunks to locate nearest solid safe land surface.
    */
   function findSafeLandingSpotAround(centerX, centerZ) {
+    const rDist = getServerRenderDistance();
+    const maxSearchRadius = rDist.blocks; // Use real-time detected server view radius!
+
     const directGround = getGroundBlockAt(centerX, centerZ);
     if (directGround && !isWaterOrLava(directGround) && SAFE_SURFACES.has(directGround.name)) {
       return { x: centerX, z: centerZ, blockName: directGround.name, safe: true };
     }
 
-    // Real-Time Expanding Archimedean Search up to 128m radius across loaded chunks
-    for (let r = 2; r <= 128; r += 4) {
+    // Dynamic Expanding Archimedean Search up to maxSearchRadius across loaded chunks
+    for (let r = 2; r <= maxSearchRadius; r += 4) {
       const stepAngle = Math.max(Math.PI / 12, Math.PI / (r * 0.5));
       for (let angle = 0; angle < Math.PI * 2; angle += stepAngle) {
         const sx = Math.round(centerX + r * Math.cos(angle));
@@ -913,13 +960,17 @@ function createBot() {
   /**
    * High-Altitude Ocean Wander & Scan (WANDER_SCAN Phase)
    * Triggered when target LZ is ocean/water and no solid ground is in immediate arrival chunks.
-   * Climbs to Y=120m altitude to maximize render-distance visibility across chunks!
+   * Dynamically calculates optimal scan altitude Y_scan & search orbit step from server render distance!
    */
   function startWanderScan() {
-    setPhase(PHASE.WANDER_SCAN, `🌊 Ocean LZ detected — climbing to Y=${SCAN_ALT} for High-Altitude Ocean Wander & Land Scan...`);
+    const rDist = getServerRenderDistance();
+    const targetScanAlt = rDist.scanAlt; // Dynamically calculated optimal scan altitude
+    const orbitStep = Math.round(rDist.blocks * 0.8); // 80% of view radius for 100% chunk overlap
+
+    setPhase(PHASE.WANDER_SCAN, `🌊 Ocean LZ detected — climbing to dynamic scan altitude Y=${targetScanAlt} (Server RenderDist: ${rDist.chunks}ch / ${rDist.blocks}m)...`);
 
     wanderAngle = 0;
-    wanderRadius = 100;
+    wanderRadius = orbitStep;
 
     if (flyLoop) clearInterval(flyLoop);
     flyLoop = setInterval(() => {
@@ -927,18 +978,18 @@ function createBot() {
 
       const pos = bot.entity.position;
 
-      // 1. Maintain Optimal Ocean Scan Altitude Y=120m
-      if (pos.y < SCAN_ALT - 10 && countRockets() > 0) {
-        console.log(`[EAFE] 🚀 Pitching UP (+0.60) to maintain high-altitude ocean scan altitude Y=${SCAN_ALT} (current Y=${pos.y.toFixed(1)})...`);
+      // 1. Maintain Dynamic Ocean Scan Altitude (e.g. Y=100 for 4ch, Y=120 for 6ch, Y=138 for 8ch)
+      if (pos.y < targetScanAlt - 10 && countRockets() > 0) {
+        console.log(`[EAFE] 🚀 Pitching UP (+0.60) to maintain dynamic scan altitude Y=${targetScanAlt} (current Y=${pos.y.toFixed(1)})...`);
         lookForce(bot.entity.yaw, 0.60);
         fireRocketDirect();
       }
 
-      // 2. Scan all loaded chunks around current high-altitude position
+      // 2. Scan all loaded chunks within server render distance around current position
       const foundSpot = findSafeLandingSpotAround(Math.round(pos.x), Math.round(pos.z));
       if (foundSpot.safe) {
         clearInterval(flyLoop); flyLoop = null;
-        console.log(`[EAFE] 🏝 SOLID LAND DISCOVERED at (${foundSpot.x}, ${foundSpot.z}) [${foundSpot.blockName}] after high-altitude scan!`);
+        console.log(`[EAFE] 🏝 SOLID LAND DISCOVERED at (${foundSpot.x}, ${foundSpot.z}) [${foundSpot.blockName}] after dynamic scan!`);
         try {
           bot.chat(`[EAFE] 🏝 Solid land discovered at (${foundSpot.x}, ${foundSpot.z}) on ${foundSpot.blockName}! Re-routing landing...`);
         } catch(_) {}
@@ -949,12 +1000,12 @@ function createBot() {
         return;
       }
 
-      // 3. Orbit in expanding spiral path across ocean
+      // 3. Orbit in expanding spiral path across ocean using dynamic orbitStep
       wanderAngle += 0.15;
       if (wanderAngle >= Math.PI * 2) {
         wanderAngle = 0;
-        wanderRadius += 50; // Expand search orbit by 50m
-        if (wanderRadius > 500) wanderRadius = 100; // Loop search spiral
+        wanderRadius += orbitStep; // Expand search orbit by dynamic step
+        if (wanderRadius > rDist.blocks * 4) wanderRadius = orbitStep; // Loop search spiral
       }
 
       const scanWayX = activeTargetX + Math.round(wanderRadius * Math.cos(wanderAngle));
@@ -970,12 +1021,13 @@ function createBot() {
 
       lookForce(targetYaw, currentMode.pitch);
 
-      console.log(`[EAFE] [WANDER_SCAN] Y=${pos.y.toFixed(1)} radius=${wanderRadius}m orbitAngle=${(wanderAngle*180/Math.PI).toFixed(0)}° speed=${(speed*20).toFixed(1)}m/s`);
+      console.log(`[EAFE] [WANDER_SCAN] Y=${pos.y.toFixed(1)} renderDist=${rDist.chunks}ch radius=${wanderRadius}m orbitAngle=${(wanderAngle*180/Math.PI).toFixed(0)}° speed=${(speed*20).toFixed(1)}m/s`);
     }, 200);
   }
 
   function startLanding() {
-    setPhase(PHASE.LANDING, `Arrived at target area — scanning arrival chunks at (${activeTargetX}, ${activeTargetZ})...`);
+    const rDist = getServerRenderDistance();
+    setPhase(PHASE.LANDING, `Arrived at target area — scanning arrival chunks (${rDist.chunks}ch/${rDist.blocks}m) at (${activeTargetX}, ${activeTargetZ})...`);
 
     // Real-Time Arrival Chunk Scan across loaded chunk memory
     const safeSpot = findSafeLandingSpotAround(activeTargetX, activeTargetZ);
@@ -983,9 +1035,9 @@ function createBot() {
     let targetX = safeSpot.x;
     let targetZ = safeSpot.z;
 
-    // IF NO SOLID GROUND IN ARRIVAL CHUNKS: CANCEL LANDING IMMEDIATELY & START HIGH-ALTITUDE WANDER SCAN!
+    // IF NO SOLID GROUND IN ARRIVAL CHUNKS: CANCEL LANDING IMMEDIATELY & START DYNAMIC WANDER SCAN!
     if (!safeSpot.safe) {
-      console.warn(`[EAFE] 🌊 CANCEL LANDING: Target area (${activeTargetX}, ${activeTargetZ}) is open ocean with NO solid land nearby! Initiating High-Altitude Wander Scan...`);
+      console.warn(`[EAFE] 🌊 CANCEL LANDING: Target area (${activeTargetX}, ${activeTargetZ}) is open ocean with NO solid land nearby! Initiating Dynamic Render Distance Wander Scan...`);
       startWanderScan();
       return;
     }
@@ -1118,7 +1170,8 @@ function createBot() {
     } else if (cmd === 'status') {
       const p = bot.entity.position;
       const elytraInfo = getElytraSummary();
-      const statusMsg = `phase=${phase} mode=${currentMode.name} target=(${activeTargetX},${activeTargetZ}) pos=(${p.x.toFixed(0)},${p.y.toFixed(0)},${p.z.toFixed(0)}) elytra=${bot.entity.elytraFlying} elytraHealth=${elytraInfo.equippedDur}/432 rockets=${countRockets()} spatialClear=${spatialClear?'✓':'✗'} dist=${dist2D().toFixed(0)}m`;
+      const rDist = getServerRenderDistance();
+      const statusMsg = `phase=${phase} mode=${currentMode.name} renderDist=${rDist.chunks}ch/${rDist.blocks}m target=(${activeTargetX},${activeTargetZ}) pos=(${p.x.toFixed(0)},${p.y.toFixed(0)},${p.z.toFixed(0)}) elytra=${bot.entity.elytraFlying} elytraHealth=${elytraInfo.equippedDur}/432 rockets=${countRockets()} spatialClear=${spatialClear?'✓':'✗'} dist=${dist2D().toFixed(0)}m`;
       console.log(`[EAFE] [STATUS] ${statusMsg}`);
       try { bot.chat(statusMsg); } catch(_) {}
 
@@ -1128,7 +1181,8 @@ function createBot() {
       const reqRockets = calculateRequiredRockets(d2d, CRUISE_ALT - bot.entity.position.y);
       const heading = findBestLaunchHeading();
       const elytraInfo = getElytraSummary();
-      const auditMsg = `Audit [${currentMode.name} Target=(${activeTargetX},${activeTargetZ})]: Rockets=${rocketsAvail}/${reqRockets} ElytraDur=${elytraInfo.equippedDur}/432 Heading=${heading.headingName} Checkmark=${spatialClear?'✓':'✗'}`;
+      const rDist = getServerRenderDistance();
+      const auditMsg = `Audit [${currentMode.name} Target=(${activeTargetX},${activeTargetZ}) RenderDist=${rDist.chunks}ch]: Rockets=${rocketsAvail}/${reqRockets} ElytraDur=${elytraInfo.equippedDur}/432 Heading=${heading.headingName} Checkmark=${spatialClear?'✓':'✗'}`;
       console.log(`[EAFE] [AUDIT] ${auditMsg}`);
       try { bot.chat(auditMsg); } catch(_) {}
     }
@@ -1192,9 +1246,10 @@ function createBot() {
         autoEquipRocket().then(() => {
           const count = countRockets();
           const elytraInfo = getElytraSummary();
-          console.log(`[EAFE] Inventory audit: elytra=${ok} (${elytraInfo.equippedDur}/432) rockets=${count} mode=${currentMode.name}`);
+          const rDist = getServerRenderDistance();
+          console.log(`[EAFE] Inventory audit: elytra=${ok} (${elytraInfo.equippedDur}/432) rockets=${count} mode=${currentMode.name} renderDist=${rDist.chunks}chunks`);
           try {
-            bot.chat(`[EAFE] Ready  Target:(${activeTargetX},${activeTargetZ})  Mode:${currentMode.name}  Elytra:${ok ? `${elytraInfo.equippedDur}/432` : '✗'}  Rockets:${count}  |  f [X Z]  m fast/med/low  s=stop`);
+            bot.chat(`[EAFE] Ready  Target:(${activeTargetX},${activeTargetZ})  Mode:${currentMode.name}  RenderDist:${rDist.chunks}ch  Elytra:${ok ? `${elytraInfo.equippedDur}/432` : '✗'}  Rockets:${count}  |  f [X Z]  m fast/med/low  s=stop`);
           } catch(_) {}
         });
       });
@@ -1234,10 +1289,10 @@ function createBot() {
 
 // ─── BANNER ──────────────────────────────────────────────────────────────────
 console.log('╔═════════════════════════════════════════════════════════════╗');
-console.log('║  EAFE v9.9 — High-Altitude Ocean Wander & Scan Engine       ║');
-console.log('║  Cancel Landing: Immediately aborts Y=75 low hover on ocean ║');
-console.log('║  Climb to Y=120: Ascends to Y=120 to maximize chunk view    ║');
-console.log('║  High-Alt Wander Scan: Orbits until solid land is detected  ║');
+console.log('║  EAFE v10.0 — Dynamic Server Render Distance Detection Engine║');
+console.log('║  Render Dist Audit: Measures real-time server view distance ║');
+console.log('║  Adaptive Altitude: Calculates Y_scan based on view radius  ║');
+console.log('║  Adaptive Raycasting: Dynamic raycast bounds per server    ║');
 console.log('║  Modes: FAST (35m/rk), MEDIUM (70m/rk), EFFICIENT (150m/rk)  ║');
 console.log(`║  Host: ${HOST}:${PORT}`.padEnd(61) + '║');
 console.log('╚═════════════════════════════════════════════════════════════╝');
