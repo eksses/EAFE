@@ -1,26 +1,21 @@
 'use strict';
 /**
- * EAFE v9.5 — Unified Console Terminal & In-Game Chat Control System
+ * EAFE v9.6 — Dynamic Coordinate Navigation & Arrival Chat Announcement
  * ============================================================================
  * Enhancements:
- *   1. Dual Console & In-Game Chat Control System:
- *      - You can type commands directly in the Linux terminal console OR in Minecraft chat!
- *      - Flight Mode Commands:
- *          fast / m fast / mode fast   --> Set to FAST Mode (30m/s sprint)
- *          med  / m med  / mode med    --> Set to MEDIUM Mode (22m/s balanced)
- *          low  / m low  / mode low    --> Set to EFFICIENT Mode (14m/s max saver)
- *      - Flight Action Commands:
- *          f / fly                     --> Start flight to target (100, 100)
- *          s / stop                    --> Emergency hard stop
- *          status                      --> View detailed position, mode, fuel & Elytra status
- *          audit                       --> Run pre-flight fuel & spatial audit
- *   2. Retry Failure Rocket Waste Buffer & Empirically Verified Fuel Engine:
+ *   1. Dynamic Coordinate Command Engine (f / f <X> <Z> / fly <X> <Z>):
+ *      - Type "f" or "fly" in console or chat: Flies to current target coordinates.
+ *      - Type "f <X> <Z>" (e.g. "f 500 -1200" or "fly 2500 3000"): Automatically updates
+ *        target destination to (X, Z) and starts flight IMMEDIATELY!
+ *      - Works identically from BOTH Linux Terminal Console and In-Game Chat!
+ *   2. In-Game Chat Completion Broadcast:
+ *      - Upon successful touchdown at destination, logs and broadcasts to chat:
+ *        "[EAFE] ✅ Destination Reached! Arrived safely at (X, Y, Z)"
+ *   3. Mode-Based Firework Calculation & Failed Retry Waste Buffer:
  *      - N_req = N_distance + N_climb + (MAX_RETRIES * 3) + 5
- *   3. Best Elytra Auto-Swap: Scans all slots (0..45) & equips highest durability Elytra.
- *   4. Yaw Engine: Math.atan2(-(x-px), -(z-pz)) for 100% accurate South (+Z) navigation.
- *   5. 2-Second Checker: Alarms & forces instant re-alignment if distance increases.
- *   6. Yaw-Lock Rocket Failsafe: Refuses rocket boost if heading error > 15°.
- *   7. Throttled Terrain Warnings: Rate-limited to 3.0s to eliminate log spam.
+ *   4. Best Elytra Auto-Swap Engine: Scans all slots (0..45) & equips highest durability Elytra.
+ *   5. Correct Mineflayer Yaw Navigation: Math.atan2(-(x-px), -(z-pz)) for 100% accurate South (+Z) navigation.
+ *   6. Periodic 2-Second Distance Checker & Yaw-Lock Failsafe.
  */
 
 const mineflayer    = require('mineflayer');
@@ -34,10 +29,10 @@ const { pathfinder, Movements, goals: { GoalBlock } } = require('mineflayer-path
 const HOST       = '103.151.60.212';
 const PORT       = 25565;
 const USERNAME   = 'test';
-const TARGET_X   = 100;
-const TARGET_Z   = 100;
-const CRUISE_ALT = 180;   // Safe target altitude (Y=180) to clear all terrain
-const MAX_RETRIES = 3;    // retries before giving up
+const DEFAULT_TARGET_X = 100;
+const DEFAULT_TARGET_Z = 100;
+const CRUISE_ALT       = 180;   // Safe target altitude (Y=180) to clear all terrain
+const MAX_RETRIES      = 3;     // retries before giving up
 
 // ─── FLIGHT MODES ────────────────────────────────────────────────────────────
 const MODES = {
@@ -117,6 +112,8 @@ function createBot() {
   // ── session state ──
   let phase           = PHASE.IDLE;
   let currentMode     = MODES.MEDIUM; // Default: Medium (Balanced)
+  let activeTargetX   = DEFAULT_TARGET_X;
+  let activeTargetZ   = DEFAULT_TARGET_Z;
   let retries         = 0;
   let spatialClear    = false;        // Checkmark flag for ground clearance
   let activeLaunchYaw = 0;            // Selected takeoff heading
@@ -297,7 +294,7 @@ function createBot() {
 
   function dist2D(x, z) {
     const p = bot.entity.position;
-    return Math.hypot((x ?? TARGET_X) - p.x, (z ?? TARGET_Z) - p.z);
+    return Math.hypot((x ?? activeTargetX) - p.x, (z ?? activeTargetZ) - p.z);
   }
 
   function lookForce(yaw, pitch) {
@@ -368,7 +365,7 @@ function createBot() {
       return false;
     }
 
-    const targetYaw = yawTo(TARGET_X, TARGET_Z);
+    const targetYaw = yawTo(activeTargetX, activeTargetZ);
     return fireRocketDirect(targetYaw);
   }
 
@@ -448,7 +445,7 @@ function createBot() {
    * Directional Opening Awareness Scan
    */
   function findBestLaunchHeading() {
-    const targetYaw = yawTo(TARGET_X, TARGET_Z);
+    const targetYaw = yawTo(activeTargetX, activeTargetZ);
 
     const targetCheck = checkRunwayDirection(targetYaw);
     if (targetCheck.clear) {
@@ -571,7 +568,7 @@ function createBot() {
       return;
     }
 
-    setPhase(PHASE.AUDIT, `Running pre-flight inventory, fuel & spatial audit [Mode: ${currentMode.name}]...`);
+    setPhase(PHASE.AUDIT, `Running pre-flight inventory, fuel & spatial audit [Mode: ${currentMode.name}] to (${activeTargetX}, ${activeTargetZ})...`);
 
     // 1. Best Elytra auto-swap audit
     const elytraOk = await auditAndEquipElytra();
@@ -585,13 +582,13 @@ function createBot() {
 
     // 3. Dynamic Firework Calculation BEFORE Flight (Mode Specific)
     const rocketsAvail = countRockets();
-    const d2d = dist2D(TARGET_X, TARGET_Z);
+    const d2d = dist2D(activeTargetX, activeTargetZ);
     const startY = bot.entity.position.y;
     const reqRockets = calculateRequiredRockets(d2d, CRUISE_ALT - startY);
 
     const elytraInfo = getElytraSummary();
     console.log(
-      `[EAFE] 🎆 Pre-Flight Audit [Mode=${currentMode.name}]: ` +
+      `[EAFE] 🎆 Pre-Flight Audit [Mode=${currentMode.name} Target=(${activeTargetX}, ${activeTargetZ})]: ` +
       `Rockets=${rocketsAvail}/${reqRockets} | Elytra Durability=${elytraInfo.equippedDur}/432 (${elytraInfo.count} available)`
     );
 
@@ -733,7 +730,7 @@ function createBot() {
       if (phase !== PHASE.CLIMBING) { clearInterval(climbLoop); climbLoop = null; return; }
 
       const pos = bot.entity.position;
-      const targetYaw = yawTo(TARGET_X, TARGET_Z);
+      const targetYaw = yawTo(activeTargetX, activeTargetZ);
 
       // MID-AIR YAW CURVE: Once Y >= 95m, smoothly curve yaw towards destination
       let currentYaw = activeLaunchYaw;
@@ -783,7 +780,7 @@ function createBot() {
 
   // ─── CRUISE & PERIODIC 2-SECOND COURSE CHECKER ────────────────────────────
   function startCruise() {
-    setPhase(PHASE.CRUISING, `Cruising to (${TARGET_X}, ?, ${TARGET_Z}) [Mode: ${currentMode.name}]`);
+    setPhase(PHASE.CRUISING, `Cruising to (${activeTargetX}, ?, ${activeTargetZ}) [Mode: ${currentMode.name}]`);
 
     if (rocketLoop) clearInterval(rocketLoop);
     rocketLoop = setInterval(() => {
@@ -802,7 +799,7 @@ function createBot() {
     flyLoop = setInterval(() => {
       if (phase !== PHASE.CRUISING && phase !== PHASE.DEAD_STICK) { clearInterval(flyLoop); flyLoop = null; return; }
 
-      const d = dist2D();
+      const d = dist2D(activeTargetX, activeTargetZ);
       if (d < 25) {
         clearInterval(flyLoop); flyLoop = null;
         clearInterval(rocketLoop); rocketLoop = null;
@@ -810,8 +807,8 @@ function createBot() {
         return;
       }
 
-      // ACCURATE YAW ALIGNMENT TOWARDS TARGET (100, 100)
-      const yaw = yawTo(TARGET_X, TARGET_Z);
+      // ACCURATE YAW ALIGNMENT TOWARDS TARGET
+      const yaw = yawTo(activeTargetX, activeTargetZ);
       const vel = bot.entity.velocity;
       const speed = Math.hypot(vel.x, vel.y, vel.z);
 
@@ -840,13 +837,13 @@ function createBot() {
 
     // ── PERIODIC 2-SECOND COURSE & DISTANCE CHECKER ──
     if (verifyLoop) clearInterval(verifyLoop);
-    let lastDist = dist2D();
+    let lastDist = dist2D(activeTargetX, activeTargetZ);
     verifyLoop = setInterval(() => {
       if (phase !== PHASE.CRUISING && phase !== PHASE.DEAD_STICK) { clearInterval(verifyLoop); verifyLoop = null; return; }
 
       const pos = bot.entity.position;
-      const curDist = dist2D();
-      const targetYaw = yawTo(TARGET_X, TARGET_Z);
+      const curDist = dist2D(activeTargetX, activeTargetZ);
+      const targetYaw = yawTo(activeTargetX, activeTargetZ);
 
       // Distance Increase Alarm Check (Bot moving away from goal)
       if (curDist > lastDist + 5) {
@@ -878,12 +875,12 @@ function createBot() {
     }, 2000);
   }
 
-  // ─── LANDING & DEAD-STICK FLARE ENGINE ───────────────────────────────────
+  // ─── LANDING & IN-GAME CHAT ARRIVAL ANNOUNCEMENT ────────────────────────────
   function startLanding() {
-    setPhase(PHASE.LANDING, 'Initiating Archimedean spiral landing & surface validation...');
+    setPhase(PHASE.LANDING, `Initiating Archimedean spiral landing at (${activeTargetX}, ${activeTargetZ})...`);
 
-    let targetX = TARGET_X;
-    let targetZ = TARGET_Z;
+    let targetX = activeTargetX;
+    let targetZ = activeTargetZ;
 
     let groundBlock = getGroundBlockAt(targetX, targetZ);
     if (groundBlock && (isWaterOrLava(groundBlock) || !SAFE_SURFACES.has(groundBlock.name))) {
@@ -892,8 +889,8 @@ function createBot() {
       let foundSafe = false;
       for (let r = 1; r <= 20; r += 2) {
         for (let angle = 0; angle < Math.PI * 2; angle += Math.PI / 4) {
-          const sx = Math.round(TARGET_X + r * Math.cos(angle));
-          const sz = Math.round(TARGET_Z + r * Math.sin(angle));
+          const sx = Math.round(activeTargetX + r * Math.cos(angle));
+          const sz = Math.round(activeTargetZ + r * Math.sin(angle));
           const sb = getGroundBlockAt(sx, sz);
           if (sb && !isWaterOrLava(sb) && SAFE_SURFACES.has(sb.name)) {
             targetX = sx;
@@ -928,7 +925,10 @@ function createBot() {
         try { bot.setControlState('sneak', false); } catch(_) {}
         retries = 0;
         spatialClear = false; // Reset spatial checkmark on touchdown
-        setPhase(PHASE.IDLE, `✅ Successfully landed at (${Math.round(pos.x)}, ${Math.round(pos.y)}, ${Math.round(pos.z)})`);
+
+        const arrivalMsg = `✅ Destination Reached! Arrived safely at (${Math.round(pos.x)}, ${Math.round(pos.y)}, ${Math.round(pos.z)})`;
+        setPhase(PHASE.IDLE, arrivalMsg);
+        try { bot.chat(`[EAFE] ${arrivalMsg}`); } catch(_) {}
       }
     }, 200);
   }
@@ -965,10 +965,40 @@ function createBot() {
     cmd = cmd.trim().toLowerCase();
     if (!cmd) return;
 
-    if (cmd === 'f' || cmd === 'fly') {
+    const tokens = cmd.split(/\s+/);
+    const mainCmd = tokens[0];
+
+    // Flight command: "f", "fly", "f 500 -1200", "fly 2500 3000"
+    if (mainCmd === 'f' || mainCmd === 'fly') {
+      if (tokens.length >= 3) {
+        const nx = parseInt(tokens[1], 10);
+        const nz = parseInt(tokens[2], 10);
+        if (!isNaN(nx) && !isNaN(nz)) {
+          activeTargetX = nx;
+          activeTargetZ = nz;
+          console.log(`[EAFE] 🎯 Target coordinates updated to (${activeTargetX}, ${activeTargetZ})`);
+          try { bot.chat(`[EAFE] 🎯 Target set to (${activeTargetX}, ${activeTargetZ}) — starting flight!`); } catch(_) {}
+        }
+      } else if (tokens.length === 1) {
+        console.log(`[EAFE] 🎯 Flying to target coordinates (${activeTargetX}, ${activeTargetZ})`);
+      }
+
       retries = 0;
       spatialClear = false;
       startFlight();
+
+    // Set goal without immediate takeoff: "setgoal 500 -1200", "target 500 -1200"
+    } else if (mainCmd === 'setgoal' || mainCmd === 'target' || mainCmd === 'settarget') {
+      if (tokens.length >= 3) {
+        const nx = parseInt(tokens[1], 10);
+        const nz = parseInt(tokens[2], 10);
+        if (!isNaN(nx) && !isNaN(nz)) {
+          activeTargetX = nx;
+          activeTargetZ = nz;
+          console.log(`[EAFE] 🎯 Target coordinates updated to (${activeTargetX}, ${activeTargetZ})`);
+          try { bot.chat(`[EAFE] 🎯 Target updated to (${activeTargetX}, ${activeTargetZ}) | Type 'f' to fly!`); } catch(_) {}
+        }
+      }
 
     } else if (cmd === 'mode fast' || cmd === 'm fast' || cmd === 'fast') {
       currentMode = MODES.FAST;
@@ -992,17 +1022,17 @@ function createBot() {
     } else if (cmd === 'status') {
       const p = bot.entity.position;
       const elytraInfo = getElytraSummary();
-      const statusMsg = `phase=${phase} mode=${currentMode.name} pos=(${p.x.toFixed(0)},${p.y.toFixed(0)},${p.z.toFixed(0)}) elytra=${bot.entity.elytraFlying} elytraHealth=${elytraInfo.equippedDur}/432 rockets=${countRockets()} spatialClear=${spatialClear?'✓':'✗'} dist=${dist2D().toFixed(0)}m`;
+      const statusMsg = `phase=${phase} mode=${currentMode.name} target=(${activeTargetX},${activeTargetZ}) pos=(${p.x.toFixed(0)},${p.y.toFixed(0)},${p.z.toFixed(0)}) elytra=${bot.entity.elytraFlying} elytraHealth=${elytraInfo.equippedDur}/432 rockets=${countRockets()} spatialClear=${spatialClear?'✓':'✗'} dist=${dist2D().toFixed(0)}m`;
       console.log(`[EAFE] [STATUS] ${statusMsg}`);
       try { bot.chat(statusMsg); } catch(_) {}
 
     } else if (cmd === 'audit') {
       const rocketsAvail = countRockets();
-      const d2d = dist2D(TARGET_X, TARGET_Z);
+      const d2d = dist2D(activeTargetX, activeTargetZ);
       const reqRockets = calculateRequiredRockets(d2d, CRUISE_ALT - bot.entity.position.y);
       const heading = findBestLaunchHeading();
       const elytraInfo = getElytraSummary();
-      const auditMsg = `Audit [${currentMode.name}]: Rockets=${rocketsAvail}/${reqRockets} ElytraDur=${elytraInfo.equippedDur}/432 Heading=${heading.headingName} Checkmark=${spatialClear?'✓':'✗'}`;
+      const auditMsg = `Audit [${currentMode.name} Target=(${activeTargetX},${activeTargetZ})]: Rockets=${rocketsAvail}/${reqRockets} ElytraDur=${elytraInfo.equippedDur}/432 Heading=${heading.headingName} Checkmark=${spatialClear?'✓':'✗'}`;
       console.log(`[EAFE] [AUDIT] ${auditMsg}`);
       try { bot.chat(auditMsg); } catch(_) {}
     }
@@ -1068,7 +1098,7 @@ function createBot() {
           const elytraInfo = getElytraSummary();
           console.log(`[EAFE] Inventory audit: elytra=${ok} (${elytraInfo.equippedDur}/432) rockets=${count} mode=${currentMode.name}`);
           try {
-            bot.chat(`[EAFE] Ready  Mode:${currentMode.name}  Elytra:${ok ? `${elytraInfo.equippedDur}/432` : '✗'}  Rockets:${count}  |  f=fly  m fast/med/low  s=stop`);
+            bot.chat(`[EAFE] Ready  Target:(${activeTargetX},${activeTargetZ})  Mode:${currentMode.name}  Elytra:${ok ? `${elytraInfo.equippedDur}/432` : '✗'}  Rockets:${count}  |  f [X Z]  m fast/med/low  s=stop`);
           } catch(_) {}
         });
       });
@@ -1092,7 +1122,7 @@ function createBot() {
       }
     });
 
-    console.log('[EAFE] Commands: f=fly  m fast / m med / m low  s=stop  status  audit');
+    console.log('[EAFE] Commands: f [X Z]  setgoal X Z  m fast/med/low  s=stop  status  audit');
   });
 
   // ─── DISCONNECT ───────────────────────────────────────────────────────────
@@ -1108,11 +1138,11 @@ function createBot() {
 
 // ─── BANNER ──────────────────────────────────────────────────────────────────
 console.log('╔═════════════════════════════════════════════════════════════╗');
-console.log('║  EAFE v9.5 — Dual Terminal Console & In-Game Chat Control  ║');
-console.log('║  Console & Chat: Type "fast", "med", "low", "f", "s", etc.  ║');
+console.log('║  EAFE v9.6 — Dynamic Coordinate Engine & Chat Arrival Announce ║');
+console.log('║  Commands: "f <X> <Z>", "fly <X> <Z>", "setgoal <X> <Z>"   ║');
+console.log('║  Arrival Broadcast: Chats arrival message upon landing      ║');
 console.log('║  Fuel Formula: N_req = N_dist + N_climb + N_retry + N_land  ║');
 console.log('║  Modes: FAST (35m/rk), MEDIUM (65m/rk), EFFICIENT (110m/rk)  ║');
-console.log('║  Best Elytra Auto-Swap: Auto-equips highest durability      ║');
 console.log(`║  Host: ${HOST}:${PORT}`.padEnd(61) + '║');
 console.log('╚═════════════════════════════════════════════════════════════╝');
 
