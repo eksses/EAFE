@@ -1,26 +1,29 @@
 'use strict';
 /**
- * EAFE v7.3 — Strict Firework Audit, Spatial Checkmarks & Diagnostic Takeoff
+ * EAFE v7.4 — Block Breaking, Obstacle Clearing & 1000% Certainty Relocation
  * =========================================================================
  * Enhancements:
- *   1. Strict Firework Calculation BEFORE Flight:
+ *   1. Obstacle Block Breaking (clearObstructingBlocks):
+ *      - Before deciding it cannot launch from the current spot, the bot scans
+ *        the overhead column and runway for diggable blocks (leaves, wood, dirt, etc.).
+ *      - Digs/breaks obstructing blocks automatically to clear the launch space.
+ *   2. 1000% Certainty Launch Guarantee:
+ *      - Only relocates if launch space remains blocked after attempting to dig
+ *        or if blocks are non-diggable (bedrock/indestructible structures).
+ *   3. Pathfinder Block Digging & Jumping (mineflayer-pathfinder):
+ *      - Enables canDig = true, allowParkour = true, allow1by1tunnels = true
+ *        so pathfinder digs through obstacles and jumps up ledges to reach open spot!
+ *   4. Strict Firework Audit BEFORE Launch:
  *      - Calculates N_req = ceil(d2d/68.5) + ceil(ΔY/28.0) + 15.
- *      - If rocketsAvail < N_req, ABORTS flight & asks for missing rockets in chat.
- *      - Will NOT attempt flight until required fireworks are provided.
- *   2. Ground Clearance Checkmark (spatialClear = true):
- *      - Once spatial envelope passes, sets checkmark ✓.
- *      - If flight fails due to packet timing or server delay, retries bypass
- *        unnecessary pathfinding and launch directly from the approved spot!
- *   3. Diagnostic Takeoff & Rocket Thrust:
- *      - Detailed logs for jump, airborne check, packet response, and rocket fire.
- *      - Fires firework rocket immediately upon airborne state.
- *   4. Preserved Flight Core (UNTOUCHED):
+ *      - Aborts & asks in chat if rockets are insufficient.
+ *   5. Spatial Clearance Checkmark (spatialClear = true):
+ *      - Bypasses re-pathfinding on retries when spatial clearance is approved.
+ *   6. Preserved Flight Core (UNTOUCHED):
  *      - 150ms Jump Apex Rule Takeoff.
  *      - Pitch angles: +0.65=UP (Climb), +0.05=LEVEL (Cruise), -0.30=DOWN (Landing).
  *      - Smart rocket conservation (skips firing when ||v|| ≥ 1.4 b/t).
  *      - Dead-Stick unpowered glide & 4m touchdown flare.
  *      - Native Mineflayer 50ms physics sync with @nxg-org/mineflayer-physics-util.
- *      - Pathfinder A* integration excluding liquids.
  */
 
 const mineflayer    = require('mineflayer');
@@ -42,7 +45,8 @@ const MAX_RETRIES = 3;    // retries before giving up
 const PHASE = {
   IDLE:       'IDLE',
   AUDIT:      'AUDIT',        // pre-flight inventory, fuel & spatial audit
-  RELOCATING: 'RELOCATING',   // A* pathfinding to open launch spot
+  CLEARING:   'CLEARING',     // breaking blocking blocks to clear runway
+  RELOCATING: 'RELOCATING',   // A* pathfinding & block-digging to open launch spot
   TAKEOFF:    'TAKEOFF',      // 150ms jump apex + elytraFly()
   CLIMBING:   'CLIMBING',     // nose up (+0.65), gaining altitude
   CRUISING:   'CRUISING',     // level (+0.05), heading to target
@@ -253,7 +257,7 @@ function createBot() {
   }
 
   // ─────────────────────────────────────────────────────────────────────────
-  //  PRE-FLIGHT AUDIT & SPATIAL ENVELOPE
+  //  PRE-FLIGHT AUDIT, OBSTACLE DIGGING & SPATIAL ENVELOPE
   // ─────────────────────────────────────────────────────────────────────────
 
   function auditSpatialEnvelope() {
@@ -264,7 +268,7 @@ function createBot() {
     for (let dy = 1; dy <= 5; dy++) {
       const b = bot.blockAt(pos.offset(0, dy, 0));
       if (!isAir(b)) {
-        return { clear: false, reason: `Overhead blocked at Y+${dy} (${b?.name})` };
+        return { clear: false, reason: `Overhead blocked at Y+${dy} (${b?.name})`, block: b };
       }
     }
 
@@ -277,7 +281,7 @@ function createBot() {
         const bPos = pos.offset(Math.round(dirX * d), dy, Math.round(dirZ * d));
         const b = bot.blockAt(bPos);
         if (!isAir(b)) {
-          return { clear: false, reason: `Runway blocked at ${d}m ahead (Y+${dy}: ${b?.name})` };
+          return { clear: false, reason: `Runway blocked at ${d}m ahead (Y+${dy}: ${b?.name})`, block: b };
         }
       }
     }
@@ -285,10 +289,46 @@ function createBot() {
     // 3. Ground under feet: verify it's NOT liquid (water/lava)
     const blockUnder = bot.blockAt(pos.offset(0, -0.5, 0));
     if (isWaterOrLava(blockUnder)) {
-      return { clear: false, reason: `Standing in liquid (${blockUnder?.name})` };
+      return { clear: false, reason: `Standing in liquid (${blockUnder?.name})`, block: null };
     }
 
-    return { clear: true, reason: 'Spatial envelope clear' };
+    return { clear: true, reason: 'Spatial envelope clear', block: null };
+  }
+
+  /**
+   * Attempt to BREAK obstructing blocks (leaves, wood, dirt) to clear launch space
+   * Returns true if space was cleared by digging!
+   */
+  async function clearObstructingBlocks() {
+    setPhase(PHASE.CLEARING, 'Attempting to break obstructing blocks to clear launch space...');
+
+    let clearedAny = false;
+    for (let attempt = 0; attempt < 5; attempt++) {
+      const spatial = auditSpatialEnvelope();
+      if (spatial.clear) return true;
+
+      const b = spatial.block;
+      if (b && b.diggable && !isWaterOrLava(b)) {
+        console.log(`[EAFE] ⛏ Breaking obstructing block (${b.name}) at (${b.position.x}, ${b.position.y}, ${b.position.z})...`);
+        try {
+          bot.chat(`[EAFE] ⛏ Breaking blocking ${b.name} to clear launch space...`);
+        } catch(_) {}
+        try {
+          await bot.dig(b);
+          clearedAny = true;
+          await sleep(200);
+        } catch(e) {
+          console.warn('[EAFE] Dig failed:', e.message);
+          break;
+        }
+      } else {
+        console.warn('[EAFE] Obstructing block is not diggable:', b?.name);
+        break;
+      }
+    }
+
+    const finalCheck = auditSpatialEnvelope();
+    return finalCheck.clear;
   }
 
   function findElevatedOpenSpot() {
@@ -336,13 +376,19 @@ function createBot() {
     return best;
   }
 
+  /**
+   * Pathfind to target launch spot using mineflayer-pathfinder (A* search)
+   * WITH CAN_DIG = TRUE and ALLOW_PARKOUR = TRUE so it breaks blocks & jumps up ledges!
+   */
   async function pathfindToSpot(tx, ty, tz) {
-    console.log(`[EAFE] 🗺 Pathfinding to safe launch spot (${tx}, ${ty}, ${tz})...`);
+    console.log(`[EAFE] 🗺 Pathfinding & digging path to safe launch spot (${tx}, ${ty}, ${tz})...`);
 
     const defaultMove = new Movements(bot);
-    defaultMove.canSwim = false;      // NEVER ENTER WATER
-    defaultMove.liquidCost = 100;     // HIGH PENALTY FOR LIQUIDS
-    defaultMove.allowParkour = false; // STICK TO SAFE PATHS
+    defaultMove.canDig = true;             // BREAK BLOCKS EN ROUTE!
+    defaultMove.allow1by1tunnels = true;  // Dig tunnels if needed
+    defaultMove.allowParkour = true;      // Jump over gaps & up ledges
+    defaultMove.canSwim = false;          // NO WATER
+    defaultMove.liquidCost = 100;         // HIGH PENALTY FOR LIQUIDS
 
     bot.pathfinder.setMovements(defaultMove);
     bot.pathfinder.setGoal(new GoalBlock(tx, ty, tz));
@@ -410,11 +456,23 @@ function createBot() {
 
     // 3. Ground & Spatial Clearance Checkmark
     if (!spatialClear) {
-      const spatial = auditSpatialEnvelope();
+      let spatial = auditSpatialEnvelope();
       console.log(`[EAFE] Spatial Audit: clear=${spatial.clear} (${spatial.reason})`);
 
+      // If blocked, try breaking obstructing blocks FIRST before deciding to relocate!
+      if (!spatial.clear && spatial.block?.diggable) {
+        console.log(`[EAFE] Obstructing block detected (${spatial.block.name}) — attempting to break...`);
+        const cleared = await clearObstructingBlocks();
+        if (cleared) {
+          console.log('[EAFE] ✓ Obstructing blocks broken — space now clear!');
+          spatial = { clear: true, reason: 'Cleared by block breaking' };
+        }
+      }
+
+      // ONLY if still blocked after digging, relocate with pathfinder!
       if (!spatial.clear) {
-        try { bot.chat(`[EAFE] ⚠ Launch check failed (${spatial.reason}) — pathfinding to clear spot...`); } catch(_) {}
+        console.log('[EAFE] 1000% Confirmed unable to launch from current spot — pathfinding to open spot...');
+        try { bot.chat(`[EAFE] ⚠ Launch check failed (${spatial.reason}) — pathfinding to open spot...`); } catch(_) {}
 
         const spot = findElevatedOpenSpot();
         if (!spot) {
@@ -423,7 +481,7 @@ function createBot() {
           return;
         }
 
-        setPhase(PHASE.RELOCATING, `Pathfinding to open spot (${spot.x}, ${spot.y}, ${spot.z}) on ${spot.blockName}`);
+        setPhase(PHASE.RELOCATING, `Pathfinding & digging to open spot (${spot.x}, ${spot.y}, ${spot.z}) on ${spot.blockName}`);
         const arrived = await pathfindToSpot(spot.x, spot.y, spot.z);
         if (!arrived) {
           setPhase(PHASE.FAILED, '✗ Could not pathfind to launch spot');
@@ -726,7 +784,7 @@ function createBot() {
 
     if (cmd === 'f') {
       retries = 0;
-      spatialClear = false; // Fresh start
+      spatialClear = false;
       startFlight();
 
     } else if (cmd === 's' || cmd === 'stop') {
@@ -845,11 +903,11 @@ function createBot() {
 
 // ─── BANNER ──────────────────────────────────────────────────────────────────
 console.log('╔═════════════════════════════════════════════════════════════╗');
-console.log('║  EAFE v7.3 — Firework Pre-Audit & Spatial Checkmark Engine  ║');
-console.log('║  Fuel Audit: Calculates N_req BEFORE flight, asks if short ║');
-console.log('║  Checkmark: Saved spatial Clearance ✓ (bypasses re-path)    ║');
-console.log('║  Takeoff: 150ms Jump Apex Rule + Instant Takeoff Rocket     ║');
-console.log('║  Physics: Native Mineflayer 50ms Engine                     ║');
+console.log('║  EAFE v7.4 — Obstacle Digging & 1000% Certainty Relocation   ║');
+console.log('║  Block Digging: Breaks blocking leaves/wood/dirt before rel ║');
+console.log('║  1000% Certainty: Only relocates if space stays blocked    ║');
+console.log('║  Pathfinder: A* search with canDig=true & allowParkour=true ║');
+console.log('║  Fuel: N_req Calculation BEFORE flight, asks if short       ║');
 console.log(`║  Host: ${HOST}:${PORT}`.padEnd(61) + '║');
 console.log('╚═════════════════════════════════════════════════════════════╝');
 
