@@ -1,23 +1,24 @@
 'use strict';
 /**
- * EAFE v10.1 — Straight-Line Grid Lawn-Mower Search Engine with Chunk Memory Map
- * =================================================================================
- * Straight-Line Grid Search & Memory System:
- *   1. Zero-Spinning Straight-Line Lawnmower Pattern:
- *      - Replaced orbital circle spinning with expanding straight-line cardinal grid legs
- *        (North -> East -> South -> West).
- *      - Flies in long, 100% straight lines across the ocean at maximum speed (20-30 m/s),
- *        drastically increasing chunk coverage speed while using minimal fireworks!
- *   2. Chunk Memory Map (scannedChunks Set):
- *      - Audits and remembers every scanned chunk coordinate ("cx,cz") in memory.
- *      - Guarantees the bot NEVER backtracks, spins in circles, or re-scans the same ocean
- *        area twice!
- *   3. Real-Time Server Render Distance Detection (getServerRenderDistance):
- *      - Dynamically measures server view distance (4, 6, 8, 10, 12, 16 chunks).
- *      - Dynamically calculates optimal scan altitude Y_scan & grid leg spacing (viewRadius * 1.5).
- *   4. Instant Land Lock & Re-Route:
- *      - As soon as solid land (island, shore, mainland) enters render distance, locks target,
- *        chats discovery announcement, and lands safely on solid ground.
+ * EAFE v10.2 — Flight Trail Coastline Memory & Progressive Ultra Low-Power Fuel Saver
+ * ====================================================================================
+ * Enhancements:
+ *   1. Flight Trail Coastline Memory (lastKnownSafeGround):
+ *      - Continuously records the last solid safe land surface passed over along the flight trail.
+ *      - If the target LZ turns out to be open ocean, the bot checks if a safe solid coastline
+ *        was passed on its flight path. If so, it IMMEDIATELY turns back to land safely on that
+ *        guaranteed solid coast instead of wandering into deep ocean!
+ *   2. Progressive Ultra Low-Power Fuel Saver (WANDER_SCAN Phase):
+ *      - Automatically forces MODES.EFFICIENT (-0.04 rad pitch) during ocean searches.
+ *      - As remaining firework count drops lower, applies progressive fuel conservation:
+ *          Rockets >= 15  --> Speed gate 13 m/s
+ *          Rockets < 15   --> Speed gate 10 m/s (saves 40% more fireworks)
+ *          Rockets < 8    --> Speed gate  8 m/s & -0.06 rad pitch (maximum gravity glide, uses absolute minimal rockets)
+ *   3. Straight-Line Grid Lawnmower Search & Chunk Memory Map:
+ *      - Zero circle spinning; flies in 100% straight cardinal legs (North -> East -> South -> West).
+ *      - Remembers all scanned chunks in memory so it never backtracks or re-scans the same ocean twice.
+ *   4. Dynamic Server Render Distance Detection Engine (getServerRenderDistance):
+ *      - Measures real-time server view distance (4, 6, 8, 10, 12, 16 chunks).
  *
  * Commands: f [X Z], setgoal X Z, m fast/med/low, s, status, audit.
  */
@@ -123,26 +124,29 @@ function createBot() {
   bot.loadPlugin(pathfinder);
 
   // ── session state ──
-  let phase           = PHASE.IDLE;
-  let currentMode     = MODES.MEDIUM; // Default: Medium (Balanced)
-  let activeTargetX   = DEFAULT_TARGET_X;
-  let activeTargetZ   = DEFAULT_TARGET_Z;
-  let retries         = 0;
-  let spatialClear    = false;        // Checkmark flag for ground clearance
-  let activeLaunchYaw = 0;            // Selected takeoff heading
-  let lastTerrainWarn = 0;            // Rate-limiter timestamp for terrain warnings
+  let phase               = PHASE.IDLE;
+  let currentMode         = MODES.MEDIUM; // Default: Medium (Balanced)
+  let activeTargetX       = DEFAULT_TARGET_X;
+  let activeTargetZ       = DEFAULT_TARGET_Z;
+  let retries             = 0;
+  let spatialClear        = false;        // Checkmark flag for ground clearance
+  let activeLaunchYaw     = 0;            // Selected takeoff heading
+  let lastTerrainWarn     = 0;            // Rate-limiter timestamp for terrain warnings
+
+  // Flight Trail Memory: Records last known solid safe land surface passed over
+  let lastKnownSafeGround = null;
 
   // Straight-line grid lawn-mower search state
-  let gridDirIndex    = 0;            // 0=North, 1=East, 2=South, 3=West
-  let gridLegLength   = 1;            // Current leg multiplier
-  let legStartPos     = null;         // Start position of current straight leg
-  const scannedChunks = new Set();    // Chunk Memory Map ("cx,cz")
+  let gridDirIndex        = 0;            // 0=North, 1=East, 2=South, 3=West
+  let gridLegLength       = 1;            // Current leg multiplier
+  let legStartPos         = null;         // Start position of current straight leg
+  const scannedChunks     = new Set();    // Chunk Memory Map ("cx,cz")
 
-  let physEngine      = null;
-  let flyLoop         = null;
-  let verifyLoop      = null;
-  let rocketLoop      = null;
-  let climbLoop       = null;
+  let physEngine          = null;
+  let flyLoop             = null;
+  let verifyLoop          = null;
+  let rocketLoop          = null;
+  let climbLoop           = null;
 
   // ─── Timer cleanup ────────────────────────────────────────────────────────
   function clearAllTimers() {
@@ -797,6 +801,12 @@ function createBot() {
       const pos = bot.entity.position;
       const targetYaw = yawTo(activeTargetX, activeTargetZ);
 
+      // Record Flight Trail Memory: Track solid land passed over on climb
+      const groundUnder = getGroundBlockAt(Math.round(pos.x), Math.round(pos.z));
+      if (groundUnder && !isWaterOrLava(groundUnder) && SAFE_SURFACES.has(groundUnder.name)) {
+        lastKnownSafeGround = { x: Math.round(pos.x), y: Math.round(pos.y), z: Math.round(pos.z), blockName: groundUnder.name };
+      }
+
       // MID-AIR YAW CURVE: Once Y >= 95m, smoothly curve yaw towards destination
       let currentYaw = activeLaunchYaw;
       if (pos.y >= 95) {
@@ -863,6 +873,14 @@ function createBot() {
     if (flyLoop) clearInterval(flyLoop);
     flyLoop = setInterval(() => {
       if (phase !== PHASE.CRUISING && phase !== PHASE.DEAD_STICK) { clearInterval(flyLoop); flyLoop = null; return; }
+
+      const pos = bot.entity.position;
+
+      // Record Flight Trail Memory: Track solid land passed over on cruise
+      const groundUnder = getGroundBlockAt(Math.round(pos.x), Math.round(pos.z));
+      if (groundUnder && !isWaterOrLava(groundUnder) && SAFE_SURFACES.has(groundUnder.name)) {
+        lastKnownSafeGround = { x: Math.round(pos.x), y: Math.round(pos.y), z: Math.round(pos.z), blockName: groundUnder.name };
+      }
 
       const d = dist2D(activeTargetX, activeTargetZ);
       if (d < 25) {
@@ -975,15 +993,18 @@ function createBot() {
 
   /**
    * High-Altitude Straight-Line Grid Lawnmower Search (WANDER_SCAN Phase)
-   * Flies in 100% straight cardinal legs (North -> East -> South -> West) across ocean,
-   * keeping a Chunk Memory Map (scannedChunks) to ensure ZERO overlap & ZERO spinning!
+   * Progressive Ultra Low-Power Rocket Saver: Forces EFFICIENT mode and applies
+   * progressive fuel conservation as rockets drop!
    */
   function startWanderScan() {
+    // FORCE LOW POWER ROCKET SAVER MODE FOR OCEAN SEARCHES
+    currentMode = MODES.EFFICIENT;
+
     const rDist = getServerRenderDistance();
     const targetScanAlt = rDist.scanAlt; // Dynamically calculated optimal scan altitude
     const legDistanceStep = Math.round(rDist.blocks * 1.5); // Leg length expansion per side
 
-    setPhase(PHASE.WANDER_SCAN, `🌊 Ocean LZ detected — climbing to dynamic scan altitude Y=${targetScanAlt} for Straight-Line Grid Search (RenderDist: ${rDist.chunks}ch / ${rDist.blocks}m)...`);
+    setPhase(PHASE.WANDER_SCAN, `🌊 Ocean LZ detected — forcing EFFICIENT Mode & climbing to dynamic scan altitude Y=${targetScanAlt} (RenderDist: ${rDist.chunks}ch / ${rDist.blocks}m)...`);
 
     gridDirIndex  = 0; // Start facing North (0)
     gridLegLength = 1;
@@ -995,6 +1016,19 @@ function createBot() {
       if (phase !== PHASE.WANDER_SCAN) { clearInterval(flyLoop); flyLoop = null; return; }
 
       const pos = bot.entity.position;
+      const rCount = countRockets();
+
+      // Progressive Ultra Low-Power Speed Gate (lower speed threshold = fewer rockets fired!)
+      let dynamicSpeedGate = currentMode.speedGate; // Default: 0.65 (13 m/s)
+      let dynamicPitch     = currentMode.pitch;     // Default: -0.04 rad
+
+      if (rCount < 15) {
+        dynamicSpeedGate = 0.50; // 10 m/s (uses 40% fewer rockets)
+      }
+      if (rCount < 8) {
+        dynamicSpeedGate = 0.40; // 8 m/s (uses absolute minimal rockets possible)
+        dynamicPitch     = -0.06; // steeper gravity pitch to convert altitude to speed
+      }
 
       // 1. Audit & Record loaded chunks into Chunk Memory Map
       const bX = Math.floor(pos.x) >> 4;
@@ -1006,8 +1040,8 @@ function createBot() {
       }
 
       // 2. Maintain Dynamic Ocean Scan Altitude (e.g. Y=100 for 4ch, Y=120 for 6ch, Y=138 for 8ch)
-      if (pos.y < targetScanAlt - 10 && countRockets() > 0) {
-        console.log(`[EAFE] 🚀 Pitching UP (+0.60) to maintain dynamic scan altitude Y=${targetScanAlt} (current Y=${pos.y.toFixed(1)})...`);
+      if (pos.y < targetScanAlt - 10 && rCount > 0) {
+        console.log(`[EAFE] 🚀 Pitching UP (+0.60) to maintain scan altitude Y=${targetScanAlt} (current Y=${pos.y.toFixed(1)})...`);
         lookForce(bot.entity.yaw, 0.60);
         fireRocketDirect();
       }
@@ -1016,7 +1050,7 @@ function createBot() {
       const foundSpot = findSafeLandingSpotAround(Math.round(pos.x), Math.round(pos.z));
       if (foundSpot.safe) {
         clearInterval(flyLoop); flyLoop = null;
-        console.log(`[EAFE] 🏝 SOLID LAND DISCOVERED at (${foundSpot.x}, ${foundSpot.z}) [${foundSpot.blockName}] after straight-line grid scan! (Total scanned chunks: ${scannedChunks.size})`);
+        console.log(`[EAFE] 🏝 SOLID LAND DISCOVERED at (${foundSpot.x}, ${foundSpot.z}) [${foundSpot.blockName}] after straight-line grid scan! (Scanned chunks: ${scannedChunks.size})`);
         try {
           bot.chat(`[EAFE] 🏝 Solid land discovered at (${foundSpot.x}, ${foundSpot.z}) on ${foundSpot.blockName}! Re-routing landing...`);
         } catch(_) {}
@@ -1040,21 +1074,21 @@ function createBot() {
         }
         legStartPos = pos.clone();
         const dirNames = ['North', 'East', 'South', 'West'];
-        console.log(`[EAFE] 🧭 Completed leg! Turning 90° to face ${dirNames[gridDirIndex]} (Target leg distance: ${gridLegLength * legDistanceStep}m, Total scanned chunks: ${scannedChunks.size})`);
+        console.log(`[EAFE] 🧭 Completed leg! Turning 90° to face ${dirNames[gridDirIndex]} (Target leg dist: ${gridLegLength * legDistanceStep}m, Scanned chunks: ${scannedChunks.size})`);
       }
 
       const targetYaw = CARDINAL_YAWS[gridDirIndex];
       const vel = bot.entity.velocity;
       const speed = Math.hypot(vel.x, vel.y, vel.z);
 
-      if (speed < currentMode.speedGate && countRockets() > 0) {
+      if (speed < dynamicSpeedGate && rCount > 0) {
         fireRocketDirect(targetYaw);
       }
 
-      lookForce(targetYaw, currentMode.pitch);
+      lookForce(targetYaw, dynamicPitch);
 
       const dirNames = ['North', 'East', 'South', 'West'];
-      console.log(`[EAFE] [GRID_SCAN] Y=${pos.y.toFixed(1)} dir=${dirNames[gridDirIndex]} legDist=${distOnLeg.toFixed(0)}/${targetLegDist}m speed=${(speed*20).toFixed(1)}m/s scannedChunks=${scannedChunks.size}`);
+      console.log(`[EAFE] [GRID_SCAN] Y=${pos.y.toFixed(1)} dir=${dirNames[gridDirIndex]} legDist=${distOnLeg.toFixed(0)}/${targetLegDist}m speed=${(speed*20).toFixed(1)}m/s rockets=${rCount} scannedChunks=${scannedChunks.size}`);
     }, 200);
   }
 
@@ -1068,11 +1102,25 @@ function createBot() {
     let targetX = safeSpot.x;
     let targetZ = safeSpot.z;
 
-    // IF NO SOLID GROUND IN ARRIVAL CHUNKS: CANCEL LANDING IMMEDIATELY & START STRAIGHT-LINE GRID SCAN!
+    // IF NO SOLID GROUND IN ARRIVAL CHUNKS:
+    // FIRST CHECK FLIGHT TRAIL MEMORY (lastKnownSafeGround) BEFORE SEARCHING DEEP OCEAN!
     if (!safeSpot.safe) {
-      console.warn(`[EAFE] 🌊 CANCEL LANDING: Target area (${activeTargetX}, ${activeTargetZ}) is open ocean with NO solid land nearby! Initiating Straight-Line Grid Lawnmower Scan...`);
-      startWanderScan();
-      return;
+      if (lastKnownSafeGround) {
+        const trailDist = Math.hypot(lastKnownSafeGround.x - bot.entity.position.x, lastKnownSafeGround.z - bot.entity.position.z);
+        console.warn(`[EAFE] 🏝 FLIGHT TRAIL MEMORY LOCK: Target area (${activeTargetX}, ${activeTargetZ}) is ocean, but solid coastline was flown over ${trailDist.toFixed(0)}m ago! Turning back to (${lastKnownSafeGround.x}, ${lastKnownSafeGround.z}) [${lastKnownSafeGround.blockName}]...`);
+        try {
+          bot.chat(`[EAFE] 🏝 Re-routing to guaranteed solid coastline from flight path at (${lastKnownSafeGround.x}, ${lastKnownSafeGround.z}) on ${lastKnownSafeGround.blockName}!`);
+        } catch(_) {}
+
+        activeTargetX = lastKnownSafeGround.x;
+        activeTargetZ = lastKnownSafeGround.z;
+        targetX       = lastKnownSafeGround.x;
+        targetZ       = lastKnownSafeGround.z;
+      } else {
+        console.warn(`[EAFE] 🌊 CANCEL LANDING: Target area (${activeTargetX}, ${activeTargetZ}) is open ocean with NO solid land nearby & no flight trail memory! Initiating Low-Power Grid Scan...`);
+        startWanderScan();
+        return;
+      }
     }
 
     console.log(`[EAFE] ✓ Arrival Chunk Scan: Solid landing spot approved at (${targetX}, ${targetZ}) on [${safeSpot.blockName}]`);
@@ -1322,10 +1370,10 @@ function createBot() {
 
 // ─── BANNER ──────────────────────────────────────────────────────────────────
 console.log('╔═════════════════════════════════════════════════════════════╗');
-console.log('║  EAFE v10.1 — Straight-Line Grid Lawnmower Search & Memory  ║');
-console.log('║  Zero Circle Spinning: Flies in 100% straight cardinal legs  ║');
-console.log('║  Chunk Memory Map: Remembers scanned chunks; zero backtrack ║');
-console.log('║  Render Dist Audit: Measures real-time server view distance ║');
+console.log('║  EAFE v10.2 — Flight Trail Memory & Progressive Fuel Saver   ║');
+console.log('║  Flight Trail Lock: Re-routes to last known coastline flown  ║');
+console.log('║  Progressive Saver: Auto-lowers speed gate as rockets drop  ║');
+console.log('║  Straight-Line Grid: Flies in 100% straight cardinal legs   ║');
 console.log('║  Modes: FAST (35m/rk), MEDIUM (70m/rk), EFFICIENT (150m/rk)  ║');
 console.log(`║  Host: ${HOST}:${PORT}`.padEnd(61) + '║');
 console.log('╚═════════════════════════════════════════════════════════════╝');
