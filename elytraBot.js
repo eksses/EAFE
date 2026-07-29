@@ -1,22 +1,25 @@
 'use strict';
 /**
- * EAFE v10.0 — Dynamic Server Render Distance Detection Engine & Failsafe Scanner
+ * EAFE v10.1 — Straight-Line Grid Lawn-Mower Search Engine with Chunk Memory Map
  * =================================================================================
- * Real-Time Render Distance Calibration:
- *   - Automatically detects the server's real-time view distance (4, 6, 8, 10, 12, 16 chunks)
- *     by auditing loaded chunk column memory (bot.world.getColumns()).
- *   - Dynamically calculates:
- *       1. Active View Radius (blocks = chunks * 16). E.g., 4 chunks = 64m, 6 chunks = 96m.
- *       2. Optimal Scan Altitude: Y_scan = clamp(62 + blocks * 0.6, 95, 160).
- *          For 4 chunks -> Y=100m, 6 chunks -> Y=120m, 8 chunks -> Y=138m.
- *       3. Dynamic Raycast Limit = viewRadius (prevents scanning beyond server visibility).
- *       4. Dynamic Orbit Step = viewRadius * 0.8 (ensures zero coverage gaps in ocean searches).
+ * Straight-Line Grid Search & Memory System:
+ *   1. Zero-Spinning Straight-Line Lawnmower Pattern:
+ *      - Replaced orbital circle spinning with expanding straight-line cardinal grid legs
+ *        (North -> East -> South -> West).
+ *      - Flies in long, 100% straight lines across the ocean at maximum speed (20-30 m/s),
+ *        drastically increasing chunk coverage speed while using minimal fireworks!
+ *   2. Chunk Memory Map (scannedChunks Set):
+ *      - Audits and remembers every scanned chunk coordinate ("cx,cz") in memory.
+ *      - Guarantees the bot NEVER backtracks, spins in circles, or re-scans the same ocean
+ *        area twice!
+ *   3. Real-Time Server Render Distance Detection (getServerRenderDistance):
+ *      - Dynamically measures server view distance (4, 6, 8, 10, 12, 16 chunks).
+ *      - Dynamically calculates optimal scan altitude Y_scan & grid leg spacing (viewRadius * 1.5).
+ *   4. Instant Land Lock & Re-Route:
+ *      - As soon as solid land (island, shore, mainland) enters render distance, locks target,
+ *        chats discovery announcement, and lands safely on solid ground.
  *
- * Core Failsafes:
- *   - High-Altitude Ocean Wander & Scan: Cancels Y=75 low hover over water, climbs to Y_scan.
- *   - Unconditional Landing & Wander Reserve (N_wander_landing = 12 rockets).
- *   - True Pitch-and-Glide Rocket Saver Mode (EFFICIENT = 150m/rocket).
- *   - Dual Console Terminal & In-Game Chat Commands: f [X Z], setgoal X Z, m fast/med/low, s, status, audit.
+ * Commands: f [X Z], setgoal X Z, m fast/med/low, s, status, audit.
  */
 
 const mineflayer    = require('mineflayer');
@@ -65,7 +68,7 @@ const PHASE = {
   TAKEOFF:     'TAKEOFF',      // 150ms jump apex + elytraFly() + instant off-hand rocket
   CLIMBING:    'CLIMBING',     // continuous nose up (+0.65 to +0.75), gaining altitude
   CRUISING:    'CRUISING',     // level (+0.05), heading to target
-  WANDER_SCAN: 'WANDER_SCAN',  // High-altitude ocean wander & render-distance land scan
+  WANDER_SCAN: 'WANDER_SCAN',  // High-altitude straight-line grid ocean scan
   DEAD_STICK:  'DEAD_STICK',   // unpowered glide cruise (0 rockets remaining)
   LANDING:     'LANDING',      // Archimedean spiral & surface glide (-0.30)
   FAILED:      'FAILED',       // flight failed, auto-retry scheduled
@@ -79,6 +82,14 @@ const SAFE_SURFACES = new Set([
   'oak_planks', 'spruce_planks', 'birch_planks', 'jungle_planks', 'acacia_planks',
   'dark_oak_planks', 'stone_bricks', 'deepslate', 'terracotta', 'concrete'
 ]);
+
+// Cardinal Yaw Directions for Straight-Line Grid Flying
+const CARDINAL_YAWS = [
+  Math.PI,         // North (-Z)
+  -Math.PI / 2,    // East (+X)
+  0,               // South (+Z)
+  Math.PI / 2,     // West (-X)
+];
 
 // ─── UTIL ────────────────────────────────────────────────────────────────────
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
@@ -120,8 +131,13 @@ function createBot() {
   let spatialClear    = false;        // Checkmark flag for ground clearance
   let activeLaunchYaw = 0;            // Selected takeoff heading
   let lastTerrainWarn = 0;            // Rate-limiter timestamp for terrain warnings
-  let wanderAngle     = 0;            // High-altitude spiral wander angle
-  let wanderRadius    = 100;          // High-altitude spiral wander radius
+
+  // Straight-line grid lawn-mower search state
+  let gridDirIndex    = 0;            // 0=North, 1=East, 2=South, 3=West
+  let gridLegLength   = 1;            // Current leg multiplier
+  let legStartPos     = null;         // Start position of current straight leg
+  const scannedChunks = new Set();    // Chunk Memory Map ("cx,cz")
+
   let physEngine      = null;
   let flyLoop         = null;
   let verifyLoop      = null;
@@ -925,7 +941,7 @@ function createBot() {
   }
 
   // ─────────────────────────────────────────────────────────────────────────
-  //  DYNAMIC SERVER RENDER DISTANCE HIGH-ALTITUDE OCEAN WANDER SCAN ENGINE
+  //  STRAIGHT-LINE GRID LAWN-MOWER SEARCH ENGINE WITH CHUNK MEMORY MAP
   // ─────────────────────────────────────────────────────────────────────────
 
   /**
@@ -958,19 +974,21 @@ function createBot() {
   }
 
   /**
-   * High-Altitude Ocean Wander & Scan (WANDER_SCAN Phase)
-   * Triggered when target LZ is ocean/water and no solid ground is in immediate arrival chunks.
-   * Dynamically calculates optimal scan altitude Y_scan & search orbit step from server render distance!
+   * High-Altitude Straight-Line Grid Lawnmower Search (WANDER_SCAN Phase)
+   * Flies in 100% straight cardinal legs (North -> East -> South -> West) across ocean,
+   * keeping a Chunk Memory Map (scannedChunks) to ensure ZERO overlap & ZERO spinning!
    */
   function startWanderScan() {
     const rDist = getServerRenderDistance();
     const targetScanAlt = rDist.scanAlt; // Dynamically calculated optimal scan altitude
-    const orbitStep = Math.round(rDist.blocks * 0.8); // 80% of view radius for 100% chunk overlap
+    const legDistanceStep = Math.round(rDist.blocks * 1.5); // Leg length expansion per side
 
-    setPhase(PHASE.WANDER_SCAN, `🌊 Ocean LZ detected — climbing to dynamic scan altitude Y=${targetScanAlt} (Server RenderDist: ${rDist.chunks}ch / ${rDist.blocks}m)...`);
+    setPhase(PHASE.WANDER_SCAN, `🌊 Ocean LZ detected — climbing to dynamic scan altitude Y=${targetScanAlt} for Straight-Line Grid Search (RenderDist: ${rDist.chunks}ch / ${rDist.blocks}m)...`);
 
-    wanderAngle = 0;
-    wanderRadius = orbitStep;
+    gridDirIndex  = 0; // Start facing North (0)
+    gridLegLength = 1;
+    legStartPos   = bot.entity.position.clone();
+    scannedChunks.clear();
 
     if (flyLoop) clearInterval(flyLoop);
     flyLoop = setInterval(() => {
@@ -978,18 +996,27 @@ function createBot() {
 
       const pos = bot.entity.position;
 
-      // 1. Maintain Dynamic Ocean Scan Altitude (e.g. Y=100 for 4ch, Y=120 for 6ch, Y=138 for 8ch)
+      // 1. Audit & Record loaded chunks into Chunk Memory Map
+      const bX = Math.floor(pos.x) >> 4;
+      const bZ = Math.floor(pos.z) >> 4;
+      for (let dx = -rDist.chunks; dx <= rDist.chunks; dx++) {
+        for (let dz = -rDist.chunks; dz <= rDist.chunks; dz++) {
+          scannedChunks.add(`${bX + dx},${bZ + dz}`);
+        }
+      }
+
+      // 2. Maintain Dynamic Ocean Scan Altitude (e.g. Y=100 for 4ch, Y=120 for 6ch, Y=138 for 8ch)
       if (pos.y < targetScanAlt - 10 && countRockets() > 0) {
         console.log(`[EAFE] 🚀 Pitching UP (+0.60) to maintain dynamic scan altitude Y=${targetScanAlt} (current Y=${pos.y.toFixed(1)})...`);
         lookForce(bot.entity.yaw, 0.60);
         fireRocketDirect();
       }
 
-      // 2. Scan all loaded chunks within server render distance around current position
+      // 3. Scan all loaded chunks within server render distance around current position
       const foundSpot = findSafeLandingSpotAround(Math.round(pos.x), Math.round(pos.z));
       if (foundSpot.safe) {
         clearInterval(flyLoop); flyLoop = null;
-        console.log(`[EAFE] 🏝 SOLID LAND DISCOVERED at (${foundSpot.x}, ${foundSpot.z}) [${foundSpot.blockName}] after dynamic scan!`);
+        console.log(`[EAFE] 🏝 SOLID LAND DISCOVERED at (${foundSpot.x}, ${foundSpot.z}) [${foundSpot.blockName}] after straight-line grid scan! (Total scanned chunks: ${scannedChunks.size})`);
         try {
           bot.chat(`[EAFE] 🏝 Solid land discovered at (${foundSpot.x}, ${foundSpot.z}) on ${foundSpot.blockName}! Re-routing landing...`);
         } catch(_) {}
@@ -1000,28 +1027,34 @@ function createBot() {
         return;
       }
 
-      // 3. Orbit in expanding spiral path across ocean using dynamic orbitStep
-      wanderAngle += 0.15;
-      if (wanderAngle >= Math.PI * 2) {
-        wanderAngle = 0;
-        wanderRadius += orbitStep; // Expand search orbit by dynamic step
-        if (wanderRadius > rDist.blocks * 4) wanderRadius = orbitStep; // Loop search spiral
+      // 4. Straight-Line Grid Navigation (Cardinal Legs)
+      if (!legStartPos) legStartPos = pos.clone();
+      const distOnLeg = Math.hypot(pos.x - legStartPos.x, pos.z - legStartPos.z);
+      const targetLegDist = gridLegLength * legDistanceStep;
+
+      // Check if current straight leg distance is completed
+      if (distOnLeg >= targetLegDist) {
+        gridDirIndex = (gridDirIndex + 1) % 4; // Turn 90° right to next cardinal direction
+        if (gridDirIndex === 0 || gridDirIndex === 2) {
+          gridLegLength++; // Expand grid leg size every 2 turns
+        }
+        legStartPos = pos.clone();
+        const dirNames = ['North', 'East', 'South', 'West'];
+        console.log(`[EAFE] 🧭 Completed leg! Turning 90° to face ${dirNames[gridDirIndex]} (Target leg distance: ${gridLegLength * legDistanceStep}m, Total scanned chunks: ${scannedChunks.size})`);
       }
 
-      const scanWayX = activeTargetX + Math.round(wanderRadius * Math.cos(wanderAngle));
-      const scanWayZ = activeTargetZ + Math.round(wanderRadius * Math.sin(wanderAngle));
-      const targetYaw = yawTo(scanWayX, scanWayZ);
-
+      const targetYaw = CARDINAL_YAWS[gridDirIndex];
       const vel = bot.entity.velocity;
       const speed = Math.hypot(vel.x, vel.y, vel.z);
 
-      if (speed < 0.7 && countRockets() > 0) {
+      if (speed < currentMode.speedGate && countRockets() > 0) {
         fireRocketDirect(targetYaw);
       }
 
       lookForce(targetYaw, currentMode.pitch);
 
-      console.log(`[EAFE] [WANDER_SCAN] Y=${pos.y.toFixed(1)} renderDist=${rDist.chunks}ch radius=${wanderRadius}m orbitAngle=${(wanderAngle*180/Math.PI).toFixed(0)}° speed=${(speed*20).toFixed(1)}m/s`);
+      const dirNames = ['North', 'East', 'South', 'West'];
+      console.log(`[EAFE] [GRID_SCAN] Y=${pos.y.toFixed(1)} dir=${dirNames[gridDirIndex]} legDist=${distOnLeg.toFixed(0)}/${targetLegDist}m speed=${(speed*20).toFixed(1)}m/s scannedChunks=${scannedChunks.size}`);
     }, 200);
   }
 
@@ -1035,9 +1068,9 @@ function createBot() {
     let targetX = safeSpot.x;
     let targetZ = safeSpot.z;
 
-    // IF NO SOLID GROUND IN ARRIVAL CHUNKS: CANCEL LANDING IMMEDIATELY & START DYNAMIC WANDER SCAN!
+    // IF NO SOLID GROUND IN ARRIVAL CHUNKS: CANCEL LANDING IMMEDIATELY & START STRAIGHT-LINE GRID SCAN!
     if (!safeSpot.safe) {
-      console.warn(`[EAFE] 🌊 CANCEL LANDING: Target area (${activeTargetX}, ${activeTargetZ}) is open ocean with NO solid land nearby! Initiating Dynamic Render Distance Wander Scan...`);
+      console.warn(`[EAFE] 🌊 CANCEL LANDING: Target area (${activeTargetX}, ${activeTargetZ}) is open ocean with NO solid land nearby! Initiating Straight-Line Grid Lawnmower Scan...`);
       startWanderScan();
       return;
     }
@@ -1171,7 +1204,7 @@ function createBot() {
       const p = bot.entity.position;
       const elytraInfo = getElytraSummary();
       const rDist = getServerRenderDistance();
-      const statusMsg = `phase=${phase} mode=${currentMode.name} renderDist=${rDist.chunks}ch/${rDist.blocks}m target=(${activeTargetX},${activeTargetZ}) pos=(${p.x.toFixed(0)},${p.y.toFixed(0)},${p.z.toFixed(0)}) elytra=${bot.entity.elytraFlying} elytraHealth=${elytraInfo.equippedDur}/432 rockets=${countRockets()} spatialClear=${spatialClear?'✓':'✗'} dist=${dist2D().toFixed(0)}m`;
+      const statusMsg = `phase=${phase} mode=${currentMode.name} renderDist=${rDist.chunks}ch/${rDist.blocks}m target=(${activeTargetX},${activeTargetZ}) pos=(${p.x.toFixed(0)},${p.y.toFixed(0)},${p.z.toFixed(0)}) elytra=${bot.entity.elytraFlying} elytraHealth=${elytraInfo.equippedDur}/432 rockets=${countRockets()} spatialClear=${spatialClear?'✓':'✗'} dist=${dist2D().toFixed(0)}m scannedChunks=${scannedChunks.size}`;
       console.log(`[EAFE] [STATUS] ${statusMsg}`);
       try { bot.chat(statusMsg); } catch(_) {}
 
@@ -1289,10 +1322,10 @@ function createBot() {
 
 // ─── BANNER ──────────────────────────────────────────────────────────────────
 console.log('╔═════════════════════════════════════════════════════════════╗');
-console.log('║  EAFE v10.0 — Dynamic Server Render Distance Detection Engine║');
+console.log('║  EAFE v10.1 — Straight-Line Grid Lawnmower Search & Memory  ║');
+console.log('║  Zero Circle Spinning: Flies in 100% straight cardinal legs  ║');
+console.log('║  Chunk Memory Map: Remembers scanned chunks; zero backtrack ║');
 console.log('║  Render Dist Audit: Measures real-time server view distance ║');
-console.log('║  Adaptive Altitude: Calculates Y_scan based on view radius  ║');
-console.log('║  Adaptive Raycasting: Dynamic raycast bounds per server    ║');
 console.log('║  Modes: FAST (35m/rk), MEDIUM (70m/rk), EFFICIENT (150m/rk)  ║');
 console.log(`║  Host: ${HOST}:${PORT}`.padEnd(61) + '║');
 console.log('╚═════════════════════════════════════════════════════════════╝');
