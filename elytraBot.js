@@ -25,7 +25,7 @@ const mineflayer    = require('mineflayer');
 const { Vec3 }      = require('vec3');
 const physicsLoader = require('@nxg-org/mineflayer-physics-util').default;
 const { EPhysicsCtx } = require('@nxg-org/mineflayer-physics-util');
-const { pathfinder, movements: { Movements }, goals: { GoalBlock } } = require('mineflayer-pathfinder');
+const { pathfinder, Movements, goals: { GoalBlock } } = require('mineflayer-pathfinder');
 
 // ─── CONFIG ──────────────────────────────────────────────────────────────────
 const HOST       = '103.151.60.212';
