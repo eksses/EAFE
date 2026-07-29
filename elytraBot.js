@@ -1,24 +1,26 @@
 'use strict';
 /**
- * EAFE v7.2 — Elytra Autonomous Flight Engine Specification (Fixes & Pathfinder Integration)
- * =========================================================================================
- * Critical Fixes:
- *   1. Spatial Envelope Audit Bug Fix:
- *      - Changed runway check from dy=0..1 to dy=1..2 (Y+1 body & Y+2 head space).
- *      - Ground blocks at dy=0 no longer trigger false "Runway blocked at 1m" warnings in open fields!
- *   2. Pathfinder Integration (mineflayer-pathfinder):
- *      - Replaced raw walking with A* pathfinding (mineflayer-pathfinder).
- *      - Liquid cost set to infinity (canSwim = false) so bot NEVER steps into water or lava!
- *      - Pathfinds safely around obstacles to open launch spots.
- *   3. Strict Surface Safety (No Water/Lava Launches or Landings):
- *      - Strictly filters for solid ground (grass, dirt, stone, obsidian, etc.).
- *      - Re-routes launch/landing targets away from liquids and hazards.
+ * EAFE v7.3 — Strict Firework Audit, Spatial Checkmarks & Diagnostic Takeoff
+ * =========================================================================
+ * Enhancements:
+ *   1. Strict Firework Calculation BEFORE Flight:
+ *      - Calculates N_req = ceil(d2d/68.5) + ceil(ΔY/28.0) + 15.
+ *      - If rocketsAvail < N_req, ABORTS flight & asks for missing rockets in chat.
+ *      - Will NOT attempt flight until required fireworks are provided.
+ *   2. Ground Clearance Checkmark (spatialClear = true):
+ *      - Once spatial envelope passes, sets checkmark ✓.
+ *      - If flight fails due to packet timing or server delay, retries bypass
+ *        unnecessary pathfinding and launch directly from the approved spot!
+ *   3. Diagnostic Takeoff & Rocket Thrust:
+ *      - Detailed logs for jump, airborne check, packet response, and rocket fire.
+ *      - Fires firework rocket immediately upon airborne state.
  *   4. Preserved Flight Core (UNTOUCHED):
  *      - 150ms Jump Apex Rule Takeoff.
  *      - Pitch angles: +0.65=UP (Climb), +0.05=LEVEL (Cruise), -0.30=DOWN (Landing).
  *      - Smart rocket conservation (skips firing when ||v|| ≥ 1.4 b/t).
  *      - Dead-Stick unpowered glide & 4m touchdown flare.
  *      - Native Mineflayer 50ms physics sync with @nxg-org/mineflayer-physics-util.
+ *      - Pathfinder A* integration excluding liquids.
  */
 
 const mineflayer    = require('mineflayer');
@@ -83,13 +85,14 @@ function createBot() {
   bot.loadPlugin(pathfinder);
 
   // ── session state ──
-  let phase       = PHASE.IDLE;
-  let retries     = 0;
-  let physEngine  = null;
-  let flyLoop     = null;
-  let verifyLoop  = null;
-  let rocketLoop  = null;
-  let climbLoop   = null;
+  let phase        = PHASE.IDLE;
+  let retries      = 0;
+  let spatialClear = false; // Checkmark flag for ground clearance
+  let physEngine   = null;
+  let flyLoop      = null;
+  let verifyLoop   = null;
+  let rocketLoop   = null;
+  let climbLoop    = null;
 
   // ─── Timer cleanup ────────────────────────────────────────────────────────
   function clearAllTimers() {
@@ -100,6 +103,7 @@ function createBot() {
   // ─── Emergency stop ───────────────────────────────────────────────────────
   function emergencyStop(reason) {
     phase = PHASE.IDLE;
+    spatialClear = false; // Reset checkmark on emergency stop
     clearAllTimers();
     try { bot.pathfinder.stop(); } catch(_) {}
     ['sprint','forward','back','left','right','jump','sneak'].forEach(k => {
@@ -119,7 +123,7 @@ function createBot() {
     try { bot.chat(line.substring(0, 256)); } catch(_) {}
   }
 
-  // ─── Inventory & Fuel Calculation (EAFE-v7.1 Sec 2.2) ───────────────────
+  // ─── Inventory & Fuel Calculation ─────────────────────────────────────────
   function countRockets() {
     let count = 0;
     for (const i of bot.inventory.items()) {
@@ -140,7 +144,7 @@ function createBot() {
   }
 
   /**
-   * Elytra Durability & Auto-HotSwap Audit (EAFE-v7.1 Sec 3.2)
+   * Elytra Durability & Auto-HotSwap Audit
    */
   async function auditAndEquipElytra() {
     const chest = bot.inventory.slots[6];
@@ -191,7 +195,7 @@ function createBot() {
   }
 
   /**
-   * Smart Rocket Consumption & Conservation Algorithm (EAFE-v7.1 Sec 1.1 & 5.0)
+   * Smart Rocket Consumption Algorithm
    */
   function smartFireRocket() {
     if (!bot.entity.elytraFlying) return false;
@@ -249,14 +253,9 @@ function createBot() {
   }
 
   // ─────────────────────────────────────────────────────────────────────────
-  //  PRE-FLIGHT AUDIT & SPATIAL ENVELOPE (FIXED dy=1..2 & strict ground)
+  //  PRE-FLIGHT AUDIT & SPATIAL ENVELOPE
   // ─────────────────────────────────────────────────────────────────────────
 
-  /**
-   * Spatial Envelope Audit:
-   *  1. Overhead Column: Y+1 to Y+5 (5 blocks straight up)
-   *  2. Forward Runway: 4m ahead at Y+1 (body) and Y+2 (head)
-   */
   function auditSpatialEnvelope() {
     const pos = bot.entity.position;
     const yaw = yawTo(TARGET_X, TARGET_Z);
@@ -269,7 +268,7 @@ function createBot() {
       }
     }
 
-    // 2. Forward Runway: check Y+1 and Y+2 (body & head clearance, excluding ground!)
+    // 2. Forward Runway: check Y+1 and Y+2 (body & head space)
     const dirX = -Math.sin(yaw);
     const dirZ =  Math.cos(yaw);
 
@@ -292,9 +291,6 @@ function createBot() {
     return { clear: true, reason: 'Spatial envelope clear' };
   }
 
-  /**
-   * Find nearby open elevated launch spot on STRICT safe solid ground (no water/lava!)
-   */
   function findElevatedOpenSpot() {
     const pos   = bot.entity.position;
     const baseY = Math.floor(pos.y);
@@ -317,12 +313,10 @@ function createBot() {
           }
         }
 
-        // STRICT SAFETY: Must be solid ground, NEVER water or lava!
         if (!groundBlock || isWaterOrLava(groundBlock) || !SAFE_SURFACES.has(groundBlock.name)) {
           continue;
         }
 
-        // Check clear sky above ground
         let openAir = 0;
         for (let dy = 0; dy < 15; dy++) {
           if (isAir(bot.blockAt(new Vec3(cx, groundY + dy, cz)))) openAir++;
@@ -342,10 +336,6 @@ function createBot() {
     return best;
   }
 
-  /**
-   * Pathfind to target launch spot using mineflayer-pathfinder (A* search)
-   * Avoids water, lava, hazards, and pits!
-   */
   async function pathfindToSpot(tx, ty, tz) {
     console.log(`[EAFE] 🗺 Pathfinding to safe launch spot (${tx}, ${ty}, ${tz})...`);
 
@@ -394,47 +384,65 @@ function createBot() {
 
     // 1. Elytra durability audit
     const elytraOk = await auditAndEquipElytra();
-    if (!elytraOk) { setPhase(PHASE.FAILED, '✗ No usable Elytra (durability > 15)'); return; }
+    if (!elytraOk) {
+      setPhase(PHASE.FAILED, '✗ Pre-flight failed: No usable Elytra (durability > 15)');
+      return;
+    }
 
-    // 2. Fuel audit calculation
+    // 2. Strict Firework Check & Calculation BEFORE flight
     const rocketsAvail = countRockets();
     const d2d = dist2D(TARGET_X, TARGET_Z);
     const startY = bot.entity.position.y;
     const reqRockets = Math.ceil(d2d / 68.5) + Math.ceil(Math.abs(CRUISE_ALT - startY) / 28.0) + 15;
 
-    console.log(`[EAFE] Fuel Audit: Available=${rocketsAvail} | Required=${reqRockets} (dist=${d2d.toFixed(0)}m)`);
+    console.log(`[EAFE] 🎆 Firework Calculation: Available=${rocketsAvail} | Required=${reqRockets} (dist=${d2d.toFixed(0)}m)`);
+
     if (rocketsAvail < reqRockets) {
-      try { bot.chat(`[EAFE] ⚠ Fuel warning: Have ${rocketsAvail} rockets, calculated ${reqRockets} needed`); } catch(_) {}
+      const needed = reqRockets - rocketsAvail;
+      setPhase(PHASE.FAILED, `✗ Insufficient fireworks! Have ${rocketsAvail}/${reqRockets}. Please give ${needed} more rockets!`);
+      try {
+        bot.chat(`[EAFE] ✗ Need ${reqRockets} fireworks, only have ${rocketsAvail}! Please give me ${needed} more rockets.`);
+      } catch(_) {}
+      return; // Do NOT launch until fireworks are supplied!
     }
 
-    // 3. 3D Spatial Envelope Audit
-    const spatial = auditSpatialEnvelope();
-    console.log(`[EAFE] Spatial Audit: clear=${spatial.clear} (${spatial.reason})`);
+    console.log(`[EAFE] ✓ Firework Audit PASSED (${rocketsAvail}/${reqRockets} fireworks ready)`);
 
-    if (!spatial.clear) {
-      try { bot.chat(`[EAFE] ⚠ Launch check failed (${spatial.reason}) — pathfinding to clear spot...`); } catch(_) {}
+    // 3. Ground & Spatial Clearance Checkmark
+    if (!spatialClear) {
+      const spatial = auditSpatialEnvelope();
+      console.log(`[EAFE] Spatial Audit: clear=${spatial.clear} (${spatial.reason})`);
 
-      const spot = findElevatedOpenSpot();
-      if (!spot) {
-        setPhase(PHASE.FAILED, '✗ Obstacles/liquids detected — no safe open launch spot nearby');
-        scheduleRetry();
-        return;
+      if (!spatial.clear) {
+        try { bot.chat(`[EAFE] ⚠ Launch check failed (${spatial.reason}) — pathfinding to clear spot...`); } catch(_) {}
+
+        const spot = findElevatedOpenSpot();
+        if (!spot) {
+          setPhase(PHASE.FAILED, '✗ Obstacles/liquids detected — no safe open launch spot nearby');
+          scheduleRetry();
+          return;
+        }
+
+        setPhase(PHASE.RELOCATING, `Pathfinding to open spot (${spot.x}, ${spot.y}, ${spot.z}) on ${spot.blockName}`);
+        const arrived = await pathfindToSpot(spot.x, spot.y, spot.z);
+        if (!arrived) {
+          setPhase(PHASE.FAILED, '✗ Could not pathfind to launch spot');
+          scheduleRetry();
+          return;
+        }
+
+        const spatial2 = auditSpatialEnvelope();
+        if (!spatial2.clear) {
+          setPhase(PHASE.FAILED, `✗ Spatial envelope still blocked after relocation (${spatial2.reason})`);
+          scheduleRetry();
+          return;
+        }
       }
 
-      setPhase(PHASE.RELOCATING, `Pathfinding to open spot (${spot.x}, ${spot.y}, ${spot.z}) on ${spot.blockName}`);
-      const arrived = await pathfindToSpot(spot.x, spot.y, spot.z);
-      if (!arrived) {
-        setPhase(PHASE.FAILED, '✗ Could not pathfind to launch spot');
-        scheduleRetry();
-        return;
-      }
-
-      const spatial2 = auditSpatialEnvelope();
-      if (!spatial2.clear) {
-        setPhase(PHASE.FAILED, `✗ Spatial envelope still blocked after relocation (${spatial2.reason})`);
-        scheduleRetry();
-        return;
-      }
+      spatialClear = true;
+      console.log('[EAFE] ✓ Ground & Spatial Clearance PASSED (Checkmark: ✓)');
+    } else {
+      console.log('[EAFE] ✓ Ground & Spatial Clearance already approved (Checkmark: ✓) — bypassing pathfinding');
     }
 
     // ── TAKEOFF ──
@@ -442,7 +450,7 @@ function createBot() {
   }
 
   /**
-   * 150ms Jump Apex Rule Takeoff (UNTOUCHED WORKING CORE)
+   * 150ms Jump Apex Rule Takeoff (UNTOUCHED WORKING CORE + DIAGNOSTICS)
    */
   async function executeTakeoff() {
     if (phase === PHASE.FAILED) return;
@@ -470,7 +478,7 @@ function createBot() {
     bot.setControlState('jump', false);
 
     if (!airborne) {
-      setPhase(PHASE.FAILED, '✗ Jump failed (bot remained on ground)');
+      setPhase(PHASE.FAILED, '✗ Takeoff failed: Jump failed (bot remained on ground)');
       scheduleRetry();
       return;
     }
@@ -481,12 +489,13 @@ function createBot() {
       await bot.elytraFly();
       console.log('[EAFE] ✓ elytraFly() packet sent');
     } catch(e) {
-      console.error('[EAFE] elytraFly() error:', e.message);
-      setPhase(PHASE.FAILED, '✗ elytraFly error: ' + e.message);
+      console.error('[EAFE] ✗ Takeoff failed: elytraFly() rejected:', e.message);
+      setPhase(PHASE.FAILED, '✗ Takeoff failed: elytraFly rejected: ' + e.message);
       scheduleRetry();
       return;
     }
 
+    // Fire rocket IMMEDIATELY on takeoff to launch upward!
     fireRocketDirect();
 
     await sleep(250);
@@ -496,7 +505,7 @@ function createBot() {
       fireRocketDirect();
       await sleep(250);
       if (!isFlying()) {
-        setPhase(PHASE.FAILED, '✗ Elytra fly state never confirmed by server');
+        setPhase(PHASE.FAILED, '✗ Takeoff failed: Server never confirmed elytraFlying=true');
         scheduleRetry();
         return;
       }
@@ -677,6 +686,7 @@ function createBot() {
         clearInterval(verifyLoop); verifyLoop = null;
         try { bot.setControlState('sneak', false); } catch(_) {}
         retries = 0;
+        spatialClear = false; // Reset spatial checkmark on touchdown
         setPhase(PHASE.IDLE, `✅ Successfully landed at (${Math.round(pos.x)}, ${Math.round(pos.y)}, ${Math.round(pos.z)})`);
       }
     }, 200);
@@ -696,6 +706,7 @@ function createBot() {
   function scheduleRetry() {
     if (retries >= MAX_RETRIES) {
       setPhase(PHASE.FAILED, `✗ FLIGHT FAILED permanently after ${MAX_RETRIES} attempts`);
+      spatialClear = false;
       return;
     }
     retries++;
@@ -715,6 +726,7 @@ function createBot() {
 
     if (cmd === 'f') {
       retries = 0;
+      spatialClear = false; // Fresh start
       startFlight();
 
     } else if (cmd === 's' || cmd === 'stop') {
@@ -727,7 +739,7 @@ function createBot() {
         bot.chat(
           `phase=${phase} pos=(${p.x.toFixed(0)},${p.y.toFixed(0)},${p.z.toFixed(0)}) ` +
           `elytra=${bot.entity.elytraFlying} ground=${bot.entity.onGround} ` +
-          `rockets=${countRockets()} dist=${dist2D().toFixed(0)}m retries=${retries}/${MAX_RETRIES}`
+          `rockets=${countRockets()} spatialClear=${spatialClear?'✓':'✗'} dist=${dist2D().toFixed(0)}m`
         );
       } catch(_) {}
 
@@ -738,8 +750,8 @@ function createBot() {
       const spatial = auditSpatialEnvelope();
       try {
         bot.chat(
-          `Audit: Rockets=${rocketsAvail}/${reqRockets} Spatial=${spatial.clear?'✓':'✗'}` +
-          (!spatial.clear ? ` (${spatial.reason})` : '')
+          `Audit: Rockets=${rocketsAvail}/${reqRockets} Spatial=${spatial.clear?'✓':'✗'} ` +
+          `Checkmark=${spatialClear?'✓':'✗'}`
         );
       } catch(_) {}
     }
@@ -833,11 +845,11 @@ function createBot() {
 
 // ─── BANNER ──────────────────────────────────────────────────────────────────
 console.log('╔═════════════════════════════════════════════════════════════╗');
-console.log('║  EAFE v7.2 — Pathfinder & Spatial Audit Fixes               ║');
-console.log('║  Pathfinder: mineflayer-pathfinder A* (No Water/No Lava)    ║');
-console.log('║  Audit Fix: Runway checked at Y+1 & Y+2 (No Ground False +)  ║');
-console.log('║  Physics: Native Mineflayer 50ms Engine                      ║');
-console.log('║  Fuel: N_req Formula + Speed-Gated Rocket Firing (||v||)     ║');
+console.log('║  EAFE v7.3 — Firework Pre-Audit & Spatial Checkmark Engine  ║');
+console.log('║  Fuel Audit: Calculates N_req BEFORE flight, asks if short ║');
+console.log('║  Checkmark: Saved spatial Clearance ✓ (bypasses re-path)    ║');
+console.log('║  Takeoff: 150ms Jump Apex Rule + Instant Takeoff Rocket     ║');
+console.log('║  Physics: Native Mineflayer 50ms Engine                     ║');
 console.log(`║  Host: ${HOST}:${PORT}`.padEnd(61) + '║');
 console.log('╚═════════════════════════════════════════════════════════════╝');
 
