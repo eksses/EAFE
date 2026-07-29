@@ -1,20 +1,19 @@
 'use strict';
 /**
- * EAFE v10.21 — Concentric Ring Ocean Orbit Scan & Dense Chunk Land Detector
+ * EAFE v10.22 — Dual-Phase Target Orbit & Open-Ocean Wander Engine
  * ====================================================================================
  * Enhancements:
- *   1. Concentric Ring Ocean Orbit Scan (startWanderScan):
- *      - Replaced linear East shifts (which caused the bot to fly 500m+ away to 550, 24) with an
- *        EXPANDING CONCENTRIC RING ORBIT directly centered on target coordinates (activeTargetX, activeTargetZ).
- *      - Flies 40m -> 80m -> 120m -> 160m concentric rings strictly around destination, keeping the bot
- *        100% focused on the target area!
+ *   1. Dual-Phase Target Orbit & Open-Ocean Wander Engine (startWanderScan):
+ *      - Phase 1: DESTINATION_ORBIT (0m to 200m around target):
+ *        Flies concentric expanding square rings (40m -> 80m -> 120m -> 160m -> 200m) directly centered on goal.
+ *        If ANY land mass (platform/coastline) exists near the destination, it is detected and landed on in 2-5s!
+ *      - Phase 2: OPEN_OCEAN_WANDER (200m+ expanding outward):
+ *        If NO land exists near the goal (infinite ocean), the orbit ring automatically expands outward
+ *        (250m -> 300m -> 400m -> 500m...) searching all surrounding loaded chunks for the nearest continent/island!
  *   2. Dense Chunk Land Detector (findSafeLandingSpotAround):
- *      - Scans expanding radial rings (R = 0, 2, 4, 6, 8... meters) across loaded chunk memory.
- *      - Instantly detects any land mass (such as a 30x15 platform) near the goal and targets its
- *        EXACT GEOMETRIC CENTROID immediately!
- *   3. Wall Stall & Hill Friction Failsafe:
- *      - If speed < 0.05 m/s while airborne, detects hill friction/stall, turns 180°, pitches UP (+0.65 rad),
- *        and fires an emergency rocket boost to escape hill faces!
+ *      - Scans expanding radial rings (R = 0, 2, 4, 6, 8... meters) across loaded chunk memory and targets
+ *        the EXACT GEOMETRIC CENTROID of the nearest land mass immediately!
+ *   3. 3-Layer Dynamic Terrain Safety & Wall Friction Escape Failsafe.
  *
  * Commands: f [X Z], setgoal X Z, m fast/med/low, s, status, audit.
  */
@@ -1311,7 +1310,7 @@ function createBot() {
         }
       }
 
-      // 4. Concentric Ring Orbit Navigation (Always stays near destination!)
+      // 4. Dual-Phase Concentric Ring Orbit & Open-Ocean Wander Navigation
       const targetYaw = CARDINAL_YAWS[ringLegIndex % 4];
 
       if (!legStartPos) legStartPos = pos.clone();
@@ -1320,11 +1319,12 @@ function createBot() {
       if (distOnLeg >= ringSize) {
         ringLegIndex++;
         if (ringLegIndex % 2 === 0) {
-          ringSize += Math.round(rDist.blocks * 0.8); // Expand orbit ring size smoothly by 0.8x render distance
+          ringSize += Math.round(rDist.blocks * 0.8); // Smoothly expand search ring outward!
         }
         legStartPos = pos.clone();
         const dirNames = ['North', 'East', 'South', 'West'];
-        console.log(`[EAFE] 🧭 Orbit Ring Leg ${ringLegIndex} complete! Facing ${dirNames[ringLegIndex % 4]} (Ring Size: ${ringSize}m around target)...`);
+        const modeLabel = (ringSize <= 200) ? 'DESTINATION_ORBIT (0-200m)' : 'OPEN_OCEAN_WANDER (200m+)';
+        console.log(`[EAFE] 🧭 Leg ${ringLegIndex} complete! [Mode: ${modeLabel}] Facing ${dirNames[ringLegIndex % 4]} (Search Radius: ${ringSize}m)...`);
       }
 
       // ── DYNAMIC TERRAIN SAFETY & COLLISION AVOIDANCE ENGINE ──
@@ -1378,7 +1378,8 @@ function createBot() {
       lookForce(targetYaw, scanPitch);
 
       const dirNames = ['North', 'East', 'South', 'West'];
-      console.log(`[EAFE] [CONCENTRIC_SCAN] Y=${pos.y.toFixed(1)} dir=${dirNames[ringLegIndex % 4]} ringSize=${ringSize}m speed=${(speed*20).toFixed(1)}m/s rockets=${rCount} scannedChunks=${scannedChunks.size}`);
+      const phaseTag = (ringSize <= 200) ? 'DEST_ORBIT' : 'OCEAN_WANDER';
+      console.log(`[EAFE] [${phaseTag}] Y=${pos.y.toFixed(1)} dir=${dirNames[ringLegIndex % 4]} radius=${ringSize}m speed=${(speed*20).toFixed(1)}m/s rockets=${rCount} scannedChunks=${scannedChunks.size}`);
     }, 200);
   }
 
