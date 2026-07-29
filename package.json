@@ -1,0 +1,28 @@
+{
+  "name": "efly",
+  "version": "1.0.0",
+  "description": "> Protocol-level navigation for autonomous flight in Minecraft",
+  "main": "index.js",
+  "directories": {
+    "doc": "docs"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/eksses/EAFE.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/eksses/EAFE/issues"
+  },
+  "homepage": "https://github.com/eksses/EAFE#readme",
+  "dependencies": {
+    "@nxg-org/mineflayer-physics-util": "^1.9.10",
+    "mineflayer": "^4.37.1"
+  }
+}
