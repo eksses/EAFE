@@ -5,7 +5,6 @@ const { PHASE, MODES, HAZARD_SURFACES, CARDINAL_YAWS } = require('./constants');
 const { sleep, isAir, isHazardousBlock, isSafeSolidBlock, angleDiff } = require('./utils');
 const Logger = require('./logger');
 
-// Module imports
 const { countRockets, findRocket, autoEquipRocket } = require('./core/inventory');
 const { getElytraSummary, auditAndEquipElytra, calculateRequiredElytraDurability, getUnbreakingLevel } = require('./core/elytra');
 const { createRocketEngine } = require('./core/rockets');
@@ -20,7 +19,6 @@ const DEFAULTS = {
   ownerUsername: '',
   debug: false,
 
-  // Feature toggles — set false to disable
   safety: true,
   pathfinding: true,
   chunkScan: true,
@@ -29,14 +27,9 @@ const DEFAULTS = {
   landing: true,
   wander: true,
 
-  // Default target
   targetX: 0,
   targetZ: 0,
-
-  // Default flight mode
   mode: 'MED',
-
-  // Landing margin of error (blocks from edge of land mass)
   landingMargin: 2,
 };
 
@@ -72,17 +65,15 @@ class ElytraFlight extends EventEmitter {
     this._logger = Logger;
     if (this.opts.debug) this._logger.setDebug(true);
 
-    // Build context for internal modules
+    // Build context and initialize modules
     this._buildCtx();
-
-    // Initialize modules
     this._rockets = createRocketEngine(this._ctx);
     this._spatial = createSpatialEngine(this._ctx);
     this._wander = createWanderEngine(this._ctx);
     this._landing = createLandingEngine(this._ctx);
     this._phases = createFlightPhases(this._ctx);
 
-    // Reset state on respawn (e.g. after /kill or death)
+    // Reset state on respawn
     this.bot.on('spawn', () => {
       if (this._phase !== PHASE.IDLE && this._phase !== PHASE.FAILED) {
         this._logger.warn(`respawn during ${this._phase} -- reset`);
@@ -157,7 +148,7 @@ class ElytraFlight extends EventEmitter {
     };
   }
 
-  // ─── Internal Context Builder ─────────────────────────────
+  // ─── Context Builder ──────────────────────────────────────
 
   _buildCtx() {
     const self = this;
@@ -195,9 +186,9 @@ class ElytraFlight extends EventEmitter {
       sleep,
       countRockets,
       autoEquipRocket,
-      getElytraSummary,
-      calculateRequiredElytraDurability,
       getElytraSummary: () => getElytraSummary(self.bot),
+      calculateRequiredElytraDurability,
+      getUnbreakingLevel,
 
       calculateRequiredRockets: (d2d, deltaY) => {
         const dReq = Math.ceil(d2d / self.mode.fuelDistDivider);
@@ -230,11 +221,10 @@ class ElytraFlight extends EventEmitter {
 
       emergencyStop: (reason) => self._emergencyStop(reason),
 
+      // Module references — populated below
       fireRocketDirect: null,
-      shouldFireRocketDynamic: null,
       smartFireRocket: null,
       getBoostTime: null,
-
       spatial: null,
       wander: null,
       startWanderScan: null,
@@ -246,28 +236,16 @@ class ElytraFlight extends EventEmitter {
       auditAndEquipElytra: () => auditAndEquipElytra(self._ctx),
     };
 
-    // Wire up rocket module after ctx is built
+    // Wire modules
     const rocketMod = createRocketEngine(this._ctx);
     this._ctx.fireRocketDirect = rocketMod.fireRocketDirect;
-    this._ctx.shouldFireRocketDynamic = rocketMod.shouldFireRocketDynamic;
     this._ctx.smartFireRocket = rocketMod.smartFireRocket;
     this._ctx.getBoostTime = rocketMod.getBoostTime;
 
-    // Wire up spatial
-    this._spatial = createSpatialEngine(this._ctx);
     this._ctx.spatial = this._spatial;
-
-    // Wire up wander
-    this._wander = createWanderEngine(this._ctx);
     this._ctx.wander = this._wander;
     this._ctx.startWanderScan = this._wander.startWanderScan;
-
-    // Wire up landing
-    this._landing = createLandingEngine(this._ctx);
     this._ctx.startLanding = this._landing.startLanding;
-
-    // Wire up flight phases
-    this._phases = createFlightPhases(this._ctx);
     this._ctx.startFlight = this._phases.startFlight;
     this._ctx.startClimb = this._phases.startClimb;
     this._ctx.startCruise = this._phases.startCruise;
@@ -290,9 +268,6 @@ class ElytraFlight extends EventEmitter {
         }
       }
     };
-
-    // Schedule retry helper
-    this._ctx.scheduleRetry = () => self._scheduleRetry();
   }
 
   // ─── Internal Helpers ─────────────────────────────────────
@@ -316,17 +291,12 @@ class ElytraFlight extends EventEmitter {
     const curYaw = bot.entity.yaw;
     const curPitch = bot.entity.pitch;
 
-    // Normalize angle difference to [-PI, PI]
     let dy = targetYaw - curYaw;
     while (dy > Math.PI) dy -= 2 * Math.PI;
     while (dy < -Math.PI) dy += 2 * Math.PI;
 
     const dp = targetPitch - curPitch;
-
-    // Lerp factor: 0.15-0.25 = human-like mouse speed (not instant)
     const lerp = 0.15 + Math.random() * 0.10;
-
-    // Add small jitter to look natural (human hand tremor)
     const jitterY = (Math.random() - 0.5) * 0.008;
     const jitterP = (Math.random() - 0.5) * 0.005;
 
@@ -388,8 +358,6 @@ class ElytraFlight extends EventEmitter {
     };
   }
 }
-
-// ─── Exports ────────────────────────────────────────────
 
 module.exports = ElytraFlight;
 module.exports.ElytraFlight = ElytraFlight;

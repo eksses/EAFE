@@ -1,7 +1,7 @@
 'use strict';
 
 const Logger = require('../logger');
-const { isAir, isHazardousBlock, isSafeSolidBlock } = require('../utils');
+const { isSafeSolidBlock } = require('../utils');
 
 function createFlightPhases(ctx) {
   const { bot, state } = ctx;
@@ -15,6 +15,7 @@ function createFlightPhases(ctx) {
     state.flightStartPos = bot.entity.position.clone();
     state.lastKnownSafeGround = null;
 
+    // Audit
     const rDist = ctx.spatial.getServerRenderDistance();
     ctx.setPhase(ctx.PHASE.AUDIT, `${state.currentMode.name} ${rDist.chunks}ch -> (${state.activeTargetX},${state.activeTargetZ})`);
 
@@ -24,32 +25,34 @@ function createFlightPhases(ctx) {
       return;
     }
 
+    // Check elytra durability vs distance
     const d2d = ctx.dist2D(state.activeTargetX, state.activeTargetZ);
     const elytraInfo = ctx.getElytraSummary(bot);
-    const reqElytraDur = ctx.calculateRequiredElytraDurability(d2d, state.currentMode.speedMps, elytraInfo.bestUnbreaking);
+    const reqDur = ctx.calculateRequiredElytraDurability(d2d, state.currentMode.speedMps, elytraInfo.bestUnbreaking);
 
-    Logger.debug(`e: ${elytraInfo.totalDurabilityAcrossAll}/${reqElytraDur} ${elytraInfo.count}x U${elytraInfo.bestUnbreaking}`);
+    Logger.debug(`e: ${elytraInfo.totalDurabilityAcrossAll}/${reqDur} ${elytraInfo.count}x U${elytraInfo.bestUnbreaking}`);
 
-    if (elytraInfo.totalDurabilityAcrossAll < reqElytraDur) {
-      ctx.setPhase(ctx.PHASE.FAILED, `need ${reqElytraDur} dur, have ${elytraInfo.totalDurabilityAcrossAll}`);
+    if (elytraInfo.totalDurabilityAcrossAll < reqDur) {
+      ctx.setPhase(ctx.PHASE.FAILED, `need ${reqDur} dur, have ${elytraInfo.totalDurabilityAcrossAll}`);
       return;
     }
 
+    // Check rockets
     await ctx.autoEquipRocket(bot);
-
-    const rocketsAvail = ctx.countRockets(bot);
+    const rockets = ctx.countRockets(bot);
     const startY = bot.entity.position.y;
-    const reqRockets = ctx.calculateRequiredRockets(d2d, ctx.CRUISE_ALT - startY);
+    const reqRkt = ctx.calculateRequiredRockets(d2d, ctx.CRUISE_ALT - startY);
 
-    Logger.debug(`rkt: ${rocketsAvail}/${reqRockets}`);
+    Logger.debug(`rkt: ${rockets}/${reqRkt}`);
 
-    if (rocketsAvail < reqRockets) {
-      ctx.setPhase(ctx.PHASE.FAILED, `need ${reqRockets} rkt, have ${rocketsAvail}`);
+    if (rockets < reqRkt) {
+      ctx.setPhase(ctx.PHASE.FAILED, `need ${reqRkt} rkt, have ${rockets}`);
       return;
     }
 
     Logger.debug('audit PASS');
 
+    // Find launch heading
     if (!state.spatialClear) {
       let heading = ctx.spatial.findBestLaunchHeading();
       Logger.debug(`heading: ${heading.headingName}`);
@@ -155,11 +158,10 @@ function createFlightPhases(ctx) {
     const launchPosY = bot.entity.position.y;
 
     ctx.lookForce(state.activeLaunchYaw, 0.45);
-    ctx.fireRocketDirect(null, 0);
 
     if (ctx.rocketLoop) { clearInterval(ctx.rocketLoop); ctx.rocketLoop = null; }
-
     if (ctx.climbLoop) clearInterval(ctx.climbLoop);
+
     ctx.climbLoop = setInterval(() => {
       if (state.phase !== ctx.PHASE.CLIMBING) { clearInterval(ctx.climbLoop); ctx.climbLoop = null; return; }
 
@@ -169,49 +171,50 @@ function createFlightPhases(ctx) {
 
       ctx.checkMidFlightElytraSwap();
 
+      // Track safe ground
       const groundUnder = ctx.spatial.getGroundBlockAt(Math.round(pos.x), Math.round(pos.z));
       if (groundUnder && isSafeSolidBlock(groundUnder)) {
         state.lastKnownSafeGround = { x: Math.round(pos.x), y: Math.round(pos.y), z: Math.round(pos.z), blockName: groundUnder.name };
       }
 
-      let currentYaw = state.activeLaunchYaw;
-      if (pos.y >= 95) currentYaw = targetYaw;
+      // Yaw toward target after Y=95
+      const currentYaw = pos.y >= 95 ? targetYaw : state.activeLaunchYaw;
 
-      let climbPitch = (climbTicks <= 4) ? 0.45 : 0.65;
-      const terrainScan = ctx.spatial.scanFullRenderDistance(currentYaw, climbPitch);
-      if (terrainScan.hit) {
+      // Pitch: steeper if terrain ahead
+      let pitch = climbTicks <= 4 ? 0.45 : 0.65;
+      const scan = ctx.spatial.scanFullRenderDistance(currentYaw, pitch);
+      if (scan.hit) {
         if (Date.now() - state.lastTerrainWarn > 3000) {
-          Logger.warn(`terrain ${terrainScan.block} d=${terrainScan.dist}m -- climb steep`);
+          Logger.warn(`terrain ${scan.block} d=${scan.dist}m -- climb steep`);
           state.lastTerrainWarn = Date.now();
         }
-        climbPitch = 0.75;
+        pitch = 0.75;
       }
 
-      // Rockets only when speed drops below threshold — not every tick
-      const vel = bot.entity.velocity;
-      const speed = Math.hypot(vel.x, vel.y, vel.z);
-      const timeSinceBoost = Date.now() - ctx.getBoostTime();
-
-      if (speed < 0.65 && timeSinceBoost > 2000 && ctx.countRockets(bot) > 0) {
+      // Rockets: only when slow and 2s+ since last
+      const speed = Math.hypot(bot.entity.velocity.x, bot.entity.velocity.y, bot.entity.velocity.z);
+      if (speed < 0.65 && Date.now() - ctx.getBoostTime() > 2000 && ctx.countRockets(bot) > 0) {
         ctx.fireRocketDirect(currentYaw);
       }
 
-      ctx.lookForce(currentYaw, climbPitch);
+      ctx.lookForce(currentYaw, pitch);
 
-      if (bot.entity.onGround && pos.y < ctx.CRUISE_ALT - 10 && climbTicks > 5 && (pos.y < launchPosY - 2.0)) {
+      // Ground hit during climb
+      if (bot.entity.onGround && pos.y < ctx.CRUISE_ALT - 10 && climbTicks > 5 && pos.y < launchPosY - 2) {
         clearInterval(ctx.climbLoop); ctx.climbLoop = null;
         ctx.setPhase(ctx.PHASE.FAILED, 'ground hit climb');
         ctx.scheduleRetry();
         return;
       }
 
+      // Lost flight
       if (!ctx.isFlying() && !bot.entity.onGround) {
         Logger.warn('fly=false mid-climb');
         bot.elytraFly().catch(() => {});
-        ctx.fireRocketDirect(null, 1500);
         return;
       }
 
+      // Reached cruise altitude
       if (pos.y >= ctx.CRUISE_ALT) {
         clearInterval(ctx.climbLoop); ctx.climbLoop = null;
         startCruise();
@@ -222,23 +225,24 @@ function createFlightPhases(ctx) {
   function startCruise() {
     ctx.setPhase(ctx.PHASE.CRUISING, `-> (${state.activeTargetX},?,${state.activeTargetZ}) [${state.currentMode.name}]`);
 
+    // Rocket check loop — 3s interval
     if (ctx.rocketLoop) clearInterval(ctx.rocketLoop);
     ctx.rocketLoop = setInterval(() => {
       if (state.phase !== ctx.PHASE.CRUISING && state.phase !== ctx.PHASE.DEAD_STICK) { clearInterval(ctx.rocketLoop); ctx.rocketLoop = null; return; }
-
       if (ctx.countRockets(bot) === 0 && state.phase !== ctx.PHASE.DEAD_STICK) {
         ctx.setPhase(ctx.PHASE.DEAD_STICK, 'out of rkt');
       }
     }, 3000);
 
+    // Main flight loop — 50ms
     if (ctx.flyLoop) clearInterval(ctx.flyLoop);
     ctx.flyLoop = setInterval(() => {
       if (state.phase !== ctx.PHASE.CRUISING && state.phase !== ctx.PHASE.DEAD_STICK) { clearInterval(ctx.flyLoop); ctx.flyLoop = null; return; }
 
       const pos = bot.entity.position;
-
       ctx.checkMidFlightElytraSwap();
 
+      // Track safe ground
       const groundUnder = ctx.spatial.getGroundBlockAt(Math.round(pos.x), Math.round(pos.z));
       if (groundUnder && isSafeSolidBlock(groundUnder)) {
         state.lastKnownSafeGround = { x: Math.round(pos.x), y: Math.round(pos.y), z: Math.round(pos.z), blockName: groundUnder.name };
@@ -248,12 +252,12 @@ function createFlightPhases(ctx) {
       const groundY = ctx.spatial.getGroundBlockAt(state.activeTargetX, state.activeTargetZ)?.position?.y ?? 60;
       const dV = pos.y - groundY;
 
+      // Landing trigger
       if (d < 40 && dV < 50) {
         clearInterval(ctx.flyLoop); ctx.flyLoop = null;
         clearInterval(ctx.rocketLoop); ctx.rocketLoop = null;
         clearInterval(ctx.verifyLoop); ctx.verifyLoop = null;
 
-        // Check if landing spot exists at target before starting landing
         const spot = ctx.wander.findSafeLandingSpotAround(state.activeTargetX, state.activeTargetZ);
         if (spot.safe) {
           ctx.startLanding();
@@ -264,55 +268,53 @@ function createFlightPhases(ctx) {
         return;
       }
 
+      // Cruise pitch
       const yaw = ctx.yawTo(state.activeTargetX, state.activeTargetZ);
-      const vel = bot.entity.velocity;
-
-      const timeSinceBoostMs = Date.now() - ctx.getBoostTime();
-      let cruisePitch = (state.phase === ctx.PHASE.DEAD_STICK) ? 0.02 : state.currentMode.pitch;
+      const timeSinceBoost = Date.now() - ctx.getBoostTime();
+      let pitch = state.phase === ctx.PHASE.DEAD_STICK ? 0.02 : state.currentMode.pitch;
 
       if (state.phase === ctx.PHASE.CRUISING) {
-        cruisePitch = (timeSinceBoostMs < 1000) ? 0.15 : -0.04;
+        pitch = timeSinceBoost < 1000 ? 0.15 : -0.04;
 
-        // Descend faster when close horizontally but still high above target
-        if (d < 100 && dV > 50) {
-          cruisePitch = -0.20;
-        } else if (d < 60 && dV > 30) {
-          cruisePitch = -0.12;
-        }
+        if (d < 100 && dV > 50) pitch = -0.20;
+        else if (d < 60 && dV > 30) pitch = -0.12;
 
-        // Rockets: only when below cruise alt AND far from target
-        // Use pos.y directly, not dV (altitude above ground varies)
+        // Rockets: below cruise alt AND far from target
         if (pos.y < ctx.CRUISE_ALT && d > 100) {
           ctx.smartFireRocket();
         }
       }
 
-      const terrainScan = ctx.spatial.scanFullRenderDistance(yaw, cruisePitch);
-      if (terrainScan.hit && terrainScan.dist < 60) {
+      // Terrain avoidance
+      const scan = ctx.spatial.scanFullRenderDistance(yaw, pitch);
+      if (scan.hit && scan.dist < 60) {
         if (Date.now() - state.lastTerrainWarn > 3000) {
-          Logger.warn(`terrain ${terrainScan.block} d=${terrainScan.dist}m -- over`);
+          Logger.warn(`terrain ${scan.block} d=${scan.dist}m -- over`);
           state.lastTerrainWarn = Date.now();
         }
-        cruisePitch = 0.55;
+        pitch = 0.55;
         if (ctx.countRockets(bot) > 0) ctx.fireRocketDirect(yaw);
       }
 
-      if (Math.hypot(vel.x, vel.y, vel.z) < 0.05 && bot.entity.position.y > 60) {
+      // Stall recovery
+      const speed = Math.hypot(bot.entity.velocity.x, bot.entity.velocity.y, bot.entity.velocity.z);
+      if (speed < 0.05 && pos.y > 60) {
         Logger.warn('stall -- 180 boost');
         ctx.lookForce(yaw + Math.PI, 0.70);
         ctx.fireRocketDirect();
         return;
       }
 
-      ctx.lookForce(yaw, cruisePitch);
+      ctx.lookForce(yaw, pitch);
     }, 50);
 
+    // Drift verification — 2s interval
     if (ctx.verifyLoop) clearInterval(ctx.verifyLoop);
     let lastDist = ctx.dist2D(state.activeTargetX, state.activeTargetZ);
+
     ctx.verifyLoop = setInterval(() => {
       if (state.phase !== ctx.PHASE.CRUISING && state.phase !== ctx.PHASE.DEAD_STICK) { clearInterval(ctx.verifyLoop); ctx.verifyLoop = null; return; }
 
-      const pos = bot.entity.position;
       const curDist = ctx.dist2D(state.activeTargetX, state.activeTargetZ);
       const targetYaw = ctx.yawTo(state.activeTargetX, state.activeTargetZ);
 
