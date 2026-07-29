@@ -1,24 +1,28 @@
 'use strict';
 /**
- * EAFE v10.2 — Flight Trail Coastline Memory & Progressive Ultra Low-Power Fuel Saver
+ * EAFE v10.3 — Dynamic Unbreaking-Aware Elytra Health & Mid-Flight Auto-Swap Engine
  * ====================================================================================
  * Enhancements:
- *   1. Flight Trail Coastline Memory (lastKnownSafeGround):
- *      - Continuously records the last solid safe land surface passed over along the flight trail.
- *      - If the target LZ turns out to be open ocean, the bot checks if a safe solid coastline
- *        was passed on its flight path. If so, it IMMEDIATELY turns back to land safely on that
- *        guaranteed solid coast instead of wandering into deep ocean!
- *   2. Progressive Ultra Low-Power Fuel Saver (WANDER_SCAN Phase):
- *      - Automatically forces MODES.EFFICIENT (-0.04 rad pitch) during ocean searches.
- *      - As remaining firework count drops lower, applies progressive fuel conservation:
- *          Rockets >= 15  --> Speed gate 13 m/s
- *          Rockets < 15   --> Speed gate 10 m/s (saves 40% more fireworks)
- *          Rockets < 8    --> Speed gate  8 m/s & -0.06 rad pitch (maximum gravity glide, uses absolute minimal rockets)
- *   3. Straight-Line Grid Lawnmower Search & Chunk Memory Map:
- *      - Zero circle spinning; flies in 100% straight cardinal legs (North -> East -> South -> West).
- *      - Remembers all scanned chunks in memory so it never backtracks or re-scans the same ocean twice.
- *   4. Dynamic Server Render Distance Detection Engine (getServerRenderDistance):
- *      - Measures real-time server view distance (4, 6, 8, 10, 12, 16 chunks).
+ *   1. Dynamic Unbreaking-Aware Elytra Durability Audit (calculateRequiredElytraDurability):
+ *      - Reads Unbreaking enchantment levels (0, 1, 2, 3) on available Elytras.
+ *      - Calculates exact flight time (seconds) and durability consumption rate:
+ *          Unbreaking 0: 1.00 durability/sec (100% damage rate)
+ *          Unbreaking I: 0.50 durability/sec (50% damage rate)
+ *          Unbreaking II: 0.333 durability/sec (33.3% damage rate)
+ *          Unbreaking III: 0.25 durability/sec (25% damage rate - 4x lifespan!)
+ *      - Pre-flight audit sums durability across ALL usable Elytras in inventory. If total
+ *        durability < Durability_req, flight ABORTS immediately and requests more Elytras!
+ *   2. Mid-Flight Elytra Auto-Swap & Flight State Recovery (checkMidFlightElytraSwap):
+ *      - Monitors equipped Elytra durability during flight. When it drops to <= 15 points:
+ *          a. Auto-swaps to the highest durability spare Elytra in inventory.
+ *          b. Re-issues bot.elytraFly() packet immediately (since equip cancels elytraFlying).
+ *          c. Fires an off-hand firework rocket (fireRocketDirect) to restore flight momentum!
+ *   3. Flight Trail Coastline Memory (lastKnownSafeGround):
+ *      - Continuously records solid land passed over; if target is ocean, turns back to known coast.
+ *   4. Progressive Ultra Low-Power Fuel Saver (WANDER_SCAN Phase):
+ *      - Lowers rocket speed gate as rocket count drops (<15 rockets -> 10m/s, <8 -> 8m/s).
+ *   5. Straight-Line Grid Lawnmower Search & Chunk Memory Map:
+ *      - Flies in 100% straight cardinal legs with zero circle spinning and zero backtracking.
  *
  * Commands: f [X Z], setgoal X Z, m fast/med/low, s, status, audit.
  */
@@ -45,18 +49,21 @@ const MODES = {
     name: 'FAST (High Speed Sprint)',
     pitch: 0.02,
     speedGate: 1.5, // 30 m/s
+    speedMps: 30.0,
     fuelDistDivider: 35.0, // ~35m per rocket
   },
   MEDIUM: {
     name: 'MEDIUM (Balanced Glide)',
     pitch: 0.04,
     speedGate: 1.0, // 20 m/s
+    speedMps: 20.0,
     fuelDistDivider: 70.0, // ~70m per rocket
   },
   EFFICIENT: {
     name: 'EFFICIENT (True Rocket Saver)',
     pitch: -0.04, // Slight nose-down gravity pitch to convert potential energy to speed!
     speedGate: 0.65, // 13 m/s
+    speedMps: 14.0,
     fuelDistDivider: 150.0, // ~150m per rocket (70% fuel savings!)
   }
 };
@@ -260,7 +267,54 @@ function createBot() {
     }
   }
 
-  // ─── Best Elytra Auto-Swap Engine ──────────────────────────────────────────
+  // ─── DYNAMIC UNBREAKING-AWARE ELYTRA ENGINE ─────────────────────────────────
+
+  /**
+   * Audits Unbreaking enchantment level (0, 1, 2, 3) on an item
+   */
+  function getUnbreakingLevel(item) {
+    if (!item) return 0;
+    if (item.enchants && Array.isArray(item.enchants)) {
+      const u = item.enchants.find(e => e.name === 'unbreaking' || e.name === 'durability');
+      if (u) return u.lvl ?? 1;
+    }
+    try {
+      const enchs = item.nbt?.value?.Enchantments?.value?.value || item.nbt?.value?.ench?.value?.value;
+      if (enchs && Array.isArray(enchs)) {
+        const u = enchs.find(e => e.id?.value === 'unbreaking' || e.id?.value === 34);
+        if (u) return u.lvl?.value ?? 1;
+      }
+    } catch(_) {}
+    return 0;
+  }
+
+  /**
+   * Durability consumption rate per second based on Unbreaking level:
+   *   Unbreaking 0: 1.00 dur/sec
+   *   Unbreaking I: 0.50 dur/sec
+   *   Unbreaking II: 0.333 dur/sec
+   *   Unbreaking III: 0.25 dur/sec (4x lifespan!)
+   */
+  function getElytraDamageRate(unbreakingLvl) {
+    switch (unbreakingLvl) {
+      case 1:  return 0.50;
+      case 2:  return 0.333;
+      case 3:  return 0.25;
+      default: return 1.0;
+    }
+  }
+
+  /**
+   * Calculates exact required Elytra durability for a given distance and mode velocity!
+   */
+  function calculateRequiredElytraDurability(d2d, speedMps, unbreakingLvl) {
+    const flightTimeSec = d2d / Math.max(speedMps, 10.0);
+    const damageRate = getElytraDamageRate(unbreakingLvl);
+    const reqDur = Math.ceil(flightTimeSec * damageRate);
+    const reserveBuffer = 15; // 15 durability points safety buffer
+    return reqDur + reserveBuffer;
+  }
+
   /**
    * Scans all slots (including equipped slot 6) and automatically equips the
    * Elytra with the HIGHEST remaining durability!
@@ -316,18 +370,47 @@ function createBot() {
   }
 
   /**
+   * Mid-Flight Elytra Auto-Swap & Flight State Recovery Failsafe
+   * Triggers when equipped Elytra drops <= 15 durability points during active flight.
+   */
+  async function checkMidFlightElytraSwap() {
+    const chest = bot.inventory.slots[6];
+    if (!chest || chest.name !== 'elytra') return;
+
+    const dur = chest.maxDurability ? (chest.maxDurability - chest.durabilityUsed) : 432;
+    if (dur <= 15) {
+      console.warn(`[EAFE] 🎽 Equipped Elytra durability low (${dur}/432) — executing mid-flight auto-swap!`);
+      const swapped = await auditAndEquipElytra();
+      if (swapped) {
+        console.log('[EAFE] 🎽 Mid-flight Elytra swapped — re-issuing elytraFly() & rocket boost!');
+        try { await bot.elytraFly(); } catch(_) {}
+        fireRocketDirect();
+      } else {
+        console.error('[EAFE] ⚠ Out of spare Elytras! Emergency landing initiated...');
+        try { bot.chat('[EAFE] ⚠ Elytra durability low & no spares! Emergency landing!'); } catch(_) {}
+        startLanding();
+      }
+    }
+  }
+
+  /**
    * Summary diagnostics of all Elytras in inventory & equipment
    */
   function getElytraSummary() {
     let count = 0;
     let equippedDur = 0;
     let maxDur = 0;
+    let totalDurabilityAcrossAll = 0;
+    let bestUnbreaking = 0;
 
     const chest = bot.inventory.slots[6];
     if (chest?.name === 'elytra') {
       equippedDur = chest.maxDurability ? (chest.maxDurability - chest.durabilityUsed) : 432;
       count++;
+      totalDurabilityAcrossAll += equippedDur;
       if (equippedDur > maxDur) maxDur = equippedDur;
+      const u = getUnbreakingLevel(chest);
+      if (u > bestUnbreaking) bestUnbreaking = u;
     }
 
     for (let s = 0; s <= 45; s++) {
@@ -336,11 +419,14 @@ function createBot() {
       if (item && item.name === 'elytra') {
         const dur = item.maxDurability ? (item.maxDurability - item.durabilityUsed) : 432;
         count++;
+        totalDurabilityAcrossAll += dur;
         if (dur > maxDur) maxDur = dur;
+        const u = getUnbreakingLevel(item);
+        if (u > bestUnbreaking) bestUnbreaking = u;
       }
     }
 
-    return { count, equippedDur, maxDur };
+    return { count, equippedDur, maxDur, totalDurabilityAcrossAll, bestUnbreaking };
   }
 
   // ─── Mineflayer Navigation Helpers (CORRECTED YAW FORMULA) ───────────────────
@@ -362,12 +448,6 @@ function createBot() {
    * Empirically Verified Firework Fuel Calculation
    * Formula:
    *   N_req = N_distance + N_climb + N_retry_waste + N_wander_landing
-   * where:
-   *   N_distance       = ceil(d2D / fuelDistDivider) (FAST: 35.0, MEDIUM: 70.0, EFFICIENT: 150.0)
-   *   N_climb          = ceil(|ΔY| / 10.0)
-   *   N_retry_waste    = (MAX_RETRIES * 3) = 9 rockets
-   *   N_wander_landing = 12 rockets (UNCONDITIONALLY reserved for arrival chunk scan,
-   *                      wander & descent flares)
    */
   function calculateRequiredRockets(d2d, deltaY) {
     const dReq = Math.ceil(d2d / currentMode.fuelDistDivider);
@@ -646,19 +726,36 @@ function createBot() {
       return;
     }
 
-    // 2. Equip Firework Rockets to OFF-HAND
+    // 2. Dynamic Unbreaking-Aware Elytra Health Audit
+    const d2d = dist2D(activeTargetX, activeTargetZ);
+    const elytraInfo = getElytraSummary();
+    const reqElytraDur = calculateRequiredElytraDurability(d2d, currentMode.speedMps, elytraInfo.bestUnbreaking);
+
+    console.log(
+      `[EAFE] 🎽 Pre-Flight Elytra Health Audit: Total Available Durability=${elytraInfo.totalDurabilityAcrossAll}/${elytraInfo.count * 432} ` +
+      `(${elytraInfo.count} Elytras, Unbreaking ${elytraInfo.bestUnbreaking}) | Required Durability=${reqElytraDur} (dist=${d2d.toFixed(0)}m)`
+    );
+
+    if (elytraInfo.totalDurabilityAcrossAll < reqElytraDur) {
+      const neededDur = reqElytraDur - elytraInfo.totalDurabilityAcrossAll;
+      setPhase(PHASE.FAILED, `✗ Insufficient Elytra durability for ${d2d.toFixed(0)}m flight! Have ${elytraInfo.totalDurabilityAcrossAll}/${reqElytraDur} points. Please give more Elytras!`);
+      try {
+        bot.chat(`[EAFE] ✗ Insufficient Elytra durability for ${d2d.toFixed(0)}m flight! Have ${elytraInfo.totalDurabilityAcrossAll}/${reqElytraDur} points. Need ${neededDur} more durability!`);
+      } catch(_) {}
+      return; // Do NOT launch until sufficient Elytra health is supplied!
+    }
+
+    // 3. Equip Firework Rockets to OFF-HAND
     await autoEquipRocket();
 
-    // 3. Dynamic Firework Calculation BEFORE Flight (Mode Specific)
+    // 4. Dynamic Firework Calculation BEFORE Flight
     const rocketsAvail = countRockets();
-    const d2d = dist2D(activeTargetX, activeTargetZ);
     const startY = bot.entity.position.y;
     const reqRockets = calculateRequiredRockets(d2d, CRUISE_ALT - startY);
 
-    const elytraInfo = getElytraSummary();
     console.log(
-      `[EAFE] 🎆 Pre-Flight Audit [Mode=${currentMode.name} Target=(${activeTargetX}, ${activeTargetZ}) RenderDist=${rDist.chunks}ch]: ` +
-      `Rockets=${rocketsAvail}/${reqRockets} | Elytra Durability=${elytraInfo.equippedDur}/432 (${elytraInfo.count} available)`
+      `[EAFE] 🎆 Pre-Flight Rocket Audit [Mode=${currentMode.name} Target=(${activeTargetX}, ${activeTargetZ})]: ` +
+      `Rockets=${rocketsAvail}/${reqRockets}`
     );
 
     if (rocketsAvail < reqRockets) {
@@ -670,9 +767,9 @@ function createBot() {
       return; // Do NOT launch until fireworks are supplied!
     }
 
-    console.log(`[EAFE] ✓ Firework Audit PASSED (${rocketsAvail}/${reqRockets} fireworks ready for ${currentMode.name})`);
+    console.log(`[EAFE] ✓ Pre-Flight Audit PASSED (ElytraDur=${elytraInfo.totalDurabilityAcrossAll}/${reqElytraDur}, Rockets=${rocketsAvail}/${reqRockets})`);
 
-    // 4. Directional Opening Awareness & Spatial Clearance Checkmark
+    // 5. Directional Opening Awareness & Spatial Clearance Checkmark
     if (!spatialClear) {
       let heading = findBestLaunchHeading();
       console.log(`[EAFE] Directional Opening Scan: clear=${heading.clear} heading=${heading.headingName}`);
@@ -801,6 +898,9 @@ function createBot() {
       const pos = bot.entity.position;
       const targetYaw = yawTo(activeTargetX, activeTargetZ);
 
+      // Mid-flight Elytra Auto-Swap check
+      checkMidFlightElytraSwap();
+
       // Record Flight Trail Memory: Track solid land passed over on climb
       const groundUnder = getGroundBlockAt(Math.round(pos.x), Math.round(pos.z));
       if (groundUnder && !isWaterOrLava(groundUnder) && SAFE_SURFACES.has(groundUnder.name)) {
@@ -875,6 +975,9 @@ function createBot() {
       if (phase !== PHASE.CRUISING && phase !== PHASE.DEAD_STICK) { clearInterval(flyLoop); flyLoop = null; return; }
 
       const pos = bot.entity.position;
+
+      // Mid-flight Elytra Auto-Swap check
+      checkMidFlightElytraSwap();
 
       // Record Flight Trail Memory: Track solid land passed over on cruise
       const groundUnder = getGroundBlockAt(Math.round(pos.x), Math.round(pos.z));
@@ -1018,6 +1121,9 @@ function createBot() {
       const pos = bot.entity.position;
       const rCount = countRockets();
 
+      // Mid-flight Elytra Auto-Swap check
+      checkMidFlightElytraSwap();
+
       // Progressive Ultra Low-Power Speed Gate (lower speed threshold = fewer rockets fired!)
       let dynamicSpeedGate = currentMode.speedGate; // Default: 0.65 (13 m/s)
       let dynamicPitch     = currentMode.pitch;     // Default: -0.04 rad
@@ -1131,6 +1237,9 @@ function createBot() {
       const pos = bot.entity.position;
       const groundBlock = getGroundBlockAt(targetX, targetZ);
       const relY = pos.y - (groundBlock?.position?.y ?? 70);
+
+      // Mid-flight Elytra Auto-Swap check
+      checkMidFlightElytraSwap();
 
       const currentBlockUnder = getGroundBlockAt(Math.round(pos.x), Math.round(pos.z));
       const overLiquid = !currentBlockUnder || isWaterOrLava(currentBlockUnder) || !SAFE_SURFACES.has(currentBlockUnder.name);
@@ -1252,7 +1361,7 @@ function createBot() {
       const p = bot.entity.position;
       const elytraInfo = getElytraSummary();
       const rDist = getServerRenderDistance();
-      const statusMsg = `phase=${phase} mode=${currentMode.name} renderDist=${rDist.chunks}ch/${rDist.blocks}m target=(${activeTargetX},${activeTargetZ}) pos=(${p.x.toFixed(0)},${p.y.toFixed(0)},${p.z.toFixed(0)}) elytra=${bot.entity.elytraFlying} elytraHealth=${elytraInfo.equippedDur}/432 rockets=${countRockets()} spatialClear=${spatialClear?'✓':'✗'} dist=${dist2D().toFixed(0)}m scannedChunks=${scannedChunks.size}`;
+      const statusMsg = `phase=${phase} mode=${currentMode.name} renderDist=${rDist.chunks}ch/${rDist.blocks}m target=(${activeTargetX},${activeTargetZ}) pos=(${p.x.toFixed(0)},${p.y.toFixed(0)},${p.z.toFixed(0)}) elytra=${bot.entity.elytraFlying} totalElytraDur=${elytraInfo.totalDurabilityAcrossAll}/${elytraInfo.count * 432} rockets=${countRockets()} spatialClear=${spatialClear?'✓':'✗'} dist=${dist2D().toFixed(0)}m scannedChunks=${scannedChunks.size}`;
       console.log(`[EAFE] [STATUS] ${statusMsg}`);
       try { bot.chat(statusMsg); } catch(_) {}
 
@@ -1262,8 +1371,9 @@ function createBot() {
       const reqRockets = calculateRequiredRockets(d2d, CRUISE_ALT - bot.entity.position.y);
       const heading = findBestLaunchHeading();
       const elytraInfo = getElytraSummary();
+      const reqDur = calculateRequiredElytraDurability(d2d, currentMode.speedMps, elytraInfo.bestUnbreaking);
       const rDist = getServerRenderDistance();
-      const auditMsg = `Audit [${currentMode.name} Target=(${activeTargetX},${activeTargetZ}) RenderDist=${rDist.chunks}ch]: Rockets=${rocketsAvail}/${reqRockets} ElytraDur=${elytraInfo.equippedDur}/432 Heading=${heading.headingName} Checkmark=${spatialClear?'✓':'✗'}`;
+      const auditMsg = `Audit [${currentMode.name} Target=(${activeTargetX},${activeTargetZ}) RenderDist=${rDist.chunks}ch]: Rockets=${rocketsAvail}/${reqRockets} ElytraDur=${elytraInfo.totalDurabilityAcrossAll}/${reqDur} (Unbreaking ${elytraInfo.bestUnbreaking}) Heading=${heading.headingName} Checkmark=${spatialClear?'✓':'✗'}`;
       console.log(`[EAFE] [AUDIT] ${auditMsg}`);
       try { bot.chat(auditMsg); } catch(_) {}
     }
@@ -1328,9 +1438,9 @@ function createBot() {
           const count = countRockets();
           const elytraInfo = getElytraSummary();
           const rDist = getServerRenderDistance();
-          console.log(`[EAFE] Inventory audit: elytra=${ok} (${elytraInfo.equippedDur}/432) rockets=${count} mode=${currentMode.name} renderDist=${rDist.chunks}chunks`);
+          console.log(`[EAFE] Inventory audit: elytra=${ok} (${elytraInfo.equippedDur}/432, totalDurability=${elytraInfo.totalDurabilityAcrossAll}, unbreaking=${elytraInfo.bestUnbreaking}) rockets=${count} mode=${currentMode.name} renderDist=${rDist.chunks}chunks`);
           try {
-            bot.chat(`[EAFE] Ready  Target:(${activeTargetX},${activeTargetZ})  Mode:${currentMode.name}  RenderDist:${rDist.chunks}ch  Elytra:${ok ? `${elytraInfo.equippedDur}/432` : '✗'}  Rockets:${count}  |  f [X Z]  m fast/med/low  s=stop`);
+            bot.chat(`[EAFE] Ready  Target:(${activeTargetX},${activeTargetZ})  Mode:${currentMode.name}  RenderDist:${rDist.chunks}ch  Elytras:${elytraInfo.count} (Dur:${elytraInfo.totalDurabilityAcrossAll}, Unbreaking ${elytraInfo.bestUnbreaking})  Rockets:${count}  |  f [X Z]  m fast/med/low  s=stop`);
           } catch(_) {}
         });
       });
@@ -1370,11 +1480,11 @@ function createBot() {
 
 // ─── BANNER ──────────────────────────────────────────────────────────────────
 console.log('╔═════════════════════════════════════════════════════════════╗');
-console.log('║  EAFE v10.2 — Flight Trail Memory & Progressive Fuel Saver   ║');
+console.log('║  EAFE v10.3 — Unbreaking Elytra Health & Mid-Flight Swap   ║');
+console.log('║  Unbreaking Audit: Audits Unbreaking 1-3 damage rate (25-50%)║');
+console.log('║  Multi-Elytra Pre-Flight: Sums total durability across inventory║');
+console.log('║  Mid-Flight Auto-Swap: Auto-swaps <=15 dur & restores flight ║');
 console.log('║  Flight Trail Lock: Re-routes to last known coastline flown  ║');
-console.log('║  Progressive Saver: Auto-lowers speed gate as rockets drop  ║');
-console.log('║  Straight-Line Grid: Flies in 100% straight cardinal legs   ║');
-console.log('║  Modes: FAST (35m/rk), MEDIUM (70m/rk), EFFICIENT (150m/rk)  ║');
 console.log(`║  Host: ${HOST}:${PORT}`.padEnd(61) + '║');
 console.log('╚═════════════════════════════════════════════════════════════╝');
 
