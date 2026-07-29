@@ -42,8 +42,7 @@
   },
   "homepage": "https://github.com/eksses/EAFE#readme",
   "dependencies": {
-    "mineflayer-pathfinder": "^2.4.5",
-    "vec3": "^1.0.0"
+    "mineflayer-pathfinder": "^2.4.5"
   },
   "peerDependencies": {
     "mineflayer": ">=4.0.0"
@@ -56,5 +55,9 @@
   "files": [
     "src/",
     "README.md"
-  ]
+  ],
+  "devDependencies": {
+    "npm-run-all2": "^9.0.3",
+    "vec3": "^0.2.0"
+  }
 }
