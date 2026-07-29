@@ -26,7 +26,7 @@ anti-spam chat safety, and precision 2x2 platform landing.
 
 [![Node.js](https://img.shields.io/badge/Node.js-18+-339933?logo=node.js&logoColor=white)](https://nodejs.org)
 [![Mineflayer](https://img.shields.io/badge/Mineflayer-4.x-FF6600?logo=minecraft&logoColor=white)](https://github.com/PrismarineJS/mineflayer)
-[![Version](https://img.shields.io/badge/version-10.23-blueviolet)](elytraBot.js)
+[![Version](https://img.shields.io/badge/version-10.23-blueviolet)](src/index.js)
 [![License](https://img.shields.io/badge/license-ISC-green)](LICENSE)
 
 </div>
@@ -62,15 +62,18 @@ npm install
 
 ### 2. Configure
 
-Edit the top of `elytraBot.js`:
+Edit `src/config.js`:
 
 ```javascript
-const HOST       = '103.151.60.212';   // Server IP
-const PORT       = 25565;              // Server port
-const USERNAME   = 'test';             // Bot username
-const DEFAULT_TARGET_X = 100;          // Default flight target X
-const DEFAULT_TARGET_Z = 100;          // Default flight target Z
-const CRUISE_ALT       = 180;          // Cruise altitude (Y=180)
+module.exports = {
+  HOST: '103.151.60.212',   // Server IP
+  PORT: 25565,              // Server port
+  USERNAME: 'test',         // Bot username
+  DEFAULT_TARGET_X: 100,    // Default flight target X
+  DEFAULT_TARGET_Z: 100,    // Default flight target Z
+  CRUISE_ALT: 180,          // Cruise altitude (Y=180)
+  MAX_RETRIES: 3,           // Max retry attempts
+};
 ```
 
 ### 3. Run
@@ -345,11 +348,28 @@ if the bot flies too far from its starting position.
 
 ```
 EAFE/
-├── elytraBot.js      ← Main bot (the entire flight engine)
-├── package.json      ← Dependencies and metadata
-├── package-lock.json ← Locked dependency versions
-├── .gitignore        ← Ignores node_modules and logs
-└── README.md         ← You are here
+├── src/                          ← Modular source code
+│   ├── index.js                  ← Main entry & orchestrator
+│   ├── config.js                 ← Server & default configuration
+│   ├── constants.js              ← Flight modes, phases, surfaces
+│   ├── utils.js                  ← sleep(), isAir(), angleDiff()
+│   ├── commands.js               ← Chat & terminal command processor
+│   ├── core/
+│   │   ├── chat.js               ← Anti-spam safeChat(), setPhase()
+│   │   ├── inventory.js          ← Rocket counting, off-hand equip
+│   │   ├── elytra.js             ← Durability audit, Unbreaking calc
+│   │   └── rockets.js            ← Firework firing, physics eval
+│   └── flight/
+│       ├── spatial.js            ← Raycast, runway check, pathfinding
+│       ├── phases.js             ← Takeoff, climb, cruise phases
+│       ├── wander.js             ← Ocean search, chunk memory
+│       └── landing.js            ← Spiral scan, flare touchdown
+├── legacy/
+│   └── elytraBot.js              ← Original monolithic version
+├── package.json
+├── package-lock.json
+├── .gitignore
+└── README.md
 ```
 
 ---

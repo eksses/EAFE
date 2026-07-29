@@ -2,9 +2,9 @@
   "name": "eafe",
   "version": "10.23.0",
   "description": "Autonomous Elytra Flight Engine — protocol-level navigation for long-range autonomous flight in Minecraft",
-  "main": "elytraBot.js",
+  "main": "src/index.js",
   "scripts": {
-    "start": "node elytraBot.js"
+    "start": "node src/index.js"
   },
   "repository": {
     "type": "git",
