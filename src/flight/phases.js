@@ -185,14 +185,15 @@ function createFlightPhases(ctx) {
           state.lastTerrainWarn = Date.now();
         }
         climbPitch = 0.75;
-        ctx.fireRocketDirect(null, 1500);
       }
 
+      // Rockets only when speed drops below threshold — not every tick
       const vel = bot.entity.velocity;
       const speed = Math.hypot(vel.x, vel.y, vel.z);
+      const timeSinceBoost = Date.now() - ctx.getBoostTime();
 
-      if (speed < 0.65 && ctx.countRockets(bot) > 0) {
-        ctx.fireRocketDirect(null, 2200);
+      if (speed < 0.65 && timeSinceBoost > 2000 && ctx.countRockets(bot) > 0) {
+        ctx.fireRocketDirect(currentYaw);
       }
 
       ctx.lookForce(currentYaw, climbPitch);
@@ -228,11 +229,7 @@ function createFlightPhases(ctx) {
       if (ctx.countRockets(bot) === 0 && state.phase !== ctx.PHASE.DEAD_STICK) {
         ctx.setPhase(ctx.PHASE.DEAD_STICK, 'out of rkt');
       }
-
-      if (state.phase === ctx.PHASE.CRUISING) {
-        ctx.smartFireRocket();
-      }
-    }, 1200);
+    }, 3000);
 
     if (ctx.flyLoop) clearInterval(ctx.flyLoop);
     ctx.flyLoop = setInterval(() => {
@@ -248,11 +245,22 @@ function createFlightPhases(ctx) {
       }
 
       const d = ctx.dist2D(state.activeTargetX, state.activeTargetZ);
-      if (d < 40) {
+      const groundY = ctx.spatial.getGroundBlockAt(state.activeTargetX, state.activeTargetZ)?.position?.y ?? 60;
+      const dV = pos.y - groundY;
+
+      if (d < 40 && dV < 50) {
         clearInterval(ctx.flyLoop); ctx.flyLoop = null;
         clearInterval(ctx.rocketLoop); ctx.rocketLoop = null;
         clearInterval(ctx.verifyLoop); ctx.verifyLoop = null;
-        ctx.startLanding();
+
+        // Check if landing spot exists at target before starting landing
+        const spot = ctx.wander.findSafeLandingSpotAround(state.activeTargetX, state.activeTargetZ);
+        if (spot.safe) {
+          ctx.startLanding();
+        } else {
+          Logger.info(`no spot at (${state.activeTargetX},${state.activeTargetZ}) -- wander`);
+          ctx.startWanderScan();
+        }
         return;
       }
 
@@ -265,8 +273,17 @@ function createFlightPhases(ctx) {
       if (state.phase === ctx.PHASE.CRUISING) {
         cruisePitch = (timeSinceBoostMs < 1000) ? 0.15 : -0.04;
 
-        if (ctx.shouldFireRocketDynamic(pos, vel, ctx.CRUISE_ALT)) {
-          ctx.fireRocketDirect(yaw);
+        // Descend faster when close horizontally but still high above target
+        if (d < 100 && dV > 50) {
+          cruisePitch = -0.20;
+        } else if (d < 60 && dV > 30) {
+          cruisePitch = -0.12;
+        }
+
+        // Rockets: only when below cruise alt AND far from target
+        // Use pos.y directly, not dV (altitude above ground varies)
+        if (pos.y < ctx.CRUISE_ALT && d > 100) {
+          ctx.smartFireRocket();
         }
       }
 

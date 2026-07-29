@@ -42,12 +42,12 @@ function createRocketEngine(ctx) {
   function shouldFireRocketDynamic(pos, vel, maxAltCeiling = 180) {
     const { bot } = ctx;
     if (!bot.entity.elytraFlying || countRockets(bot) === 0) return false;
-    if (Date.now() - dolphinBoostTime < 1200) return false;
+    if (Date.now() - dolphinBoostTime < 3000) return false;
     if (pos.y >= maxAltCeiling) return false;
 
     const speed = Math.hypot(vel.x, vel.y, vel.z);
-    if (speed < 0.50) return true;
-    if (pos.y < maxAltCeiling - 25 && speed < 0.70) return true;
+    if (speed < 0.40) return true;
+    if (pos.y < maxAltCeiling - 30 && speed < 0.60) return true;
     return false;
   }
 
@@ -59,7 +59,7 @@ function createRocketEngine(ctx) {
     const speed = Math.hypot(vel.x, vel.y, vel.z);
 
     if (speed >= state.currentMode.speedGate) {
-      if (Date.now() - lastSkipLog > 3000) {
+      if (Date.now() - lastSkipLog > 5000) {
         Logger.debug(`rkt skip ${(speed * 20).toFixed(0)}m/s`);
         lastSkipLog = Date.now();
       }
@@ -72,8 +72,10 @@ function createRocketEngine(ctx) {
       return false;
     }
 
-    const targetYaw = ctx.yawTo(state.activeTargetX, state.activeTargetZ);
-    return fireRocketDirect(targetYaw);
+    // Cooldown: 3 seconds between rockets
+    if (Date.now() - dolphinBoostTime < 3000) return false;
+
+    return fireRocketDirect(ctx.yawTo(state.activeTargetX, state.activeTargetZ));
   }
 
   function getBoostTime() {
