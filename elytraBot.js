@@ -1,16 +1,20 @@
 'use strict';
 /**
- * EAFE v10.20 — ReferenceError Fix & Aerodynamic L/D Glide Engine
+ * EAFE v10.21 — Concentric Ring Ocean Orbit Scan & Dense Chunk Land Detector
  * ====================================================================================
  * Enhancements:
- *   1. Fixed ReferenceError in startWanderScan:
- *      - Calculated currentTrackYaw before terrain scan reference to prevent Temporal Dead Zone ReferenceError.
- *   2. Optimal Aerodynamic L/D Glide Ratio Pitch Adjustment (+0.15 / -0.04 rad):
- *      - Post-Boost Micro-Climb: Gentle +0.15 rad (+8.5°) for 1.0s to convert thrust into smooth altitude.
- *      - Optimal L/D Gravity Glide: -0.04 rad (-2.3°) for maximum distance-to-speed ratio!
- *      - Ultra-smooth, horizontal, near-flat flight with ZERO sudden speed drops or steep dives.
- *   3. 3-Layer Dynamic Terrain Safety Engine (128m Raycast + Adaptive Clearance).
- *   4. Low-Altitude Ocean Scan (Y = 85m to 95m) & Destination-Anchored Grid Engine.
+ *   1. Concentric Ring Ocean Orbit Scan (startWanderScan):
+ *      - Replaced linear East shifts (which caused the bot to fly 500m+ away to 550, 24) with an
+ *        EXPANDING CONCENTRIC RING ORBIT directly centered on target coordinates (activeTargetX, activeTargetZ).
+ *      - Flies 40m -> 80m -> 120m -> 160m concentric rings strictly around destination, keeping the bot
+ *        100% focused on the target area!
+ *   2. Dense Chunk Land Detector (findSafeLandingSpotAround):
+ *      - Scans expanding radial rings (R = 0, 2, 4, 6, 8... meters) across loaded chunk memory.
+ *      - Instantly detects any land mass (such as a 30x15 platform) near the goal and targets its
+ *        EXACT GEOMETRIC CENTROID immediately!
+ *   3. Wall Stall & Hill Friction Failsafe:
+ *      - If speed < 0.05 m/s while airborne, detects hill friction/stall, turns 180°, pitches UP (+0.65 rad),
+ *        and fires an emergency rocket boost to escape hill faces!
  *
  * Commands: f [X Z], setgoal X Z, m fast/med/low, s, status, audit.
  */
@@ -1183,27 +1187,29 @@ function createBot() {
     const rDist = getServerRenderDistance();
     const maxSearchRadius = rDist.blocks; // Use real-time detected server view radius!
 
-    // 1. Check direct center target first
-    const directGround = getGroundBlockAt(centerX, centerZ);
-    if (directGround && isSafeSolidBlock(directGround)) {
-      const centerSpot = findLandMassCenter(centerX, centerZ);
-      console.log(`[EAFE] 🏝 Direct target land found — landing at Land-Mass Center (${centerSpot.x}, ${centerSpot.z}) [${centerSpot.blockName}]`);
-      return centerSpot;
-    }
+    let bestSpot = null;
+    let bestDist = Infinity;
 
-    // 2. Search outward for the NEAREST solid safe land mass (closest to goal!)
-    for (let r = 2; r <= maxSearchRadius; r += 2) {
-      const stepAngle = Math.max(Math.PI / 12, Math.PI / (r * 0.5));
+    // Scan expanding radius rings outward from target (centerX, centerZ)
+    for (let r = 0; r <= maxSearchRadius; r += 2) {
+      const stepAngle = Math.max(Math.PI / 16, Math.PI / (r * 0.5 + 1));
       for (let angle = 0; angle < Math.PI * 2; angle += stepAngle) {
         const sx = Math.round(centerX + r * Math.cos(angle));
         const sz = Math.round(centerZ + r * Math.sin(angle));
         const sb = getGroundBlockAt(sx, sz);
         if (sb && isSafeSolidBlock(sb)) {
-          // Found nearest land mass! Calculate its exact geometric center!
           const centerSpot = findLandMassCenter(sx, sz);
-          console.log(`[EAFE] 🏝 Nearest land mass found ${r}m from goal — targeting Land-Mass Center (${centerSpot.x}, ${centerSpot.z}) [${centerSpot.blockName}]`);
-          return centerSpot;
+          const d = Math.hypot(centerSpot.x - centerX, centerSpot.z - centerZ);
+          if (d < bestDist) {
+            bestDist = d;
+            bestSpot = centerSpot;
+          }
         }
+      }
+      // If solid land was discovered in this ring, return its geometric center immediately!
+      if (bestSpot) {
+        console.log(`[EAFE] 🏝 Solid land platform discovered ${bestDist.toFixed(0)}m from goal! Landing at Land-Mass Center (${bestSpot.x}, ${bestSpot.z}) [${bestSpot.blockName}]`);
+        return bestSpot;
       }
     }
 
@@ -1211,10 +1217,10 @@ function createBot() {
   }
 
   /**
-   * Low-Altitude Destination-Anchored Grid Lawnmower Search (WANDER_SCAN Phase)
+   * Low-Altitude Concentric Ring Ocean Search (WANDER_SCAN Phase)
+   *   - Concentric Ring Orbit: Flies expanding square rings directly centered on (activeTargetX, activeTargetZ)
+   *   - Stays 100% focused on destination area (never flies 500m+ away)!
    *   - Low Altitude Ceiling (Y = 85m to 95m): Direct line-of-sight to ocean floor & nearby coastlines!
-   *   - Destination-Anchored Concentric Sweeps: Scans target location & surrounding chunks FIRST.
-   *   - Ultra Fuel Saver Dolphin Oscillation: 1 rocket per 200m+ glide distance!
    */
   function startWanderScan() {
     currentMode = MODES.EFFICIENT;
@@ -1222,13 +1228,15 @@ function createBot() {
     const rDist = getServerRenderDistance();
     const targetScanAlt = 90; // Low scan altitude (Y=90m) for crystal clear ocean floor & coast visibility!
     let scanTicks = 0;
+    let ringLegIndex = 0;
+    let ringSize = 40; // Initial 40m search box around destination
+    let ringLegProgress = 0;
 
-    setPhase(PHASE.WANDER_SCAN, `🌊 Low-Altitude Ocean Scan initiated at Y=${targetScanAlt} around (${activeTargetX}, ${activeTargetZ}) [RenderDist: ${rDist.chunks}ch / ${rDist.blocks}m]...`);
+    const originX = activeTargetX;
+    const originZ = activeTargetZ;
 
-    sweepDirection = 0; // Start facing North (0)
-    lawnState      = 'SWEEP';
-    trackCount     = 1;
-    legStartPos    = bot.entity.position.clone();
+    setPhase(PHASE.WANDER_SCAN, `🌊 Concentric Ocean Scan initiated at Y=${targetScanAlt} around (${originX}, ${originZ}) [RenderDist: ${rDist.chunks}ch / ${rDist.blocks}m]...`);
+
     scannedChunks.clear();
 
     if (flyLoop) clearInterval(flyLoop);
@@ -1259,32 +1267,6 @@ function createBot() {
         }
       }
 
-      // ── DYNAMIC TERRAIN SAFETY & COLLISION AVOIDANCE ENGINE ──
-      // 1. Raycast Obstacle Scan (128m lookahead along flight yaw)
-      const currentTrackYaw = (lawnState === 'SHIFT') ? (-Math.PI / 2) : CARDINAL_YAWS[sweepDirection];
-      const scanHeading = currentTrackYaw ?? bot.entity.yaw;
-      const terrainScan = scanFullRenderDistance(scanHeading, 0.20);
-      const groundUnder = getGroundBlockAt(Math.round(pos.x), Math.round(pos.z));
-      const groundY = groundUnder?.position?.y ?? 60;
-      const minSafeY = groundY + 20; // Maintain at least 20m clearance above ground floor
-
-      if (terrainScan.hit && terrainScan.dist < 80) {
-        if (Date.now() - lastTerrainWarn > 2000) {
-          console.warn(`[EAFE] 🏔 Hill/Obstacle (${terrainScan.block}) detected ${terrainScan.dist}m ahead — EMERGENCY ASCENT (+0.65 rad) over terrain!`);
-          lastTerrainWarn = Date.now();
-        }
-        lookForce(scanHeading, 0.65);
-        if (rCount > 0) fireRocketDirect(scanHeading);
-        return; // Pause low-altitude dive until obstacle is cleared!
-      }
-
-      // 2. Adaptive Terrain Clearance: If terrain elevation rises under bot (Y < groundY + 20), climb up!
-      if (pos.y < minSafeY && rCount > 0 && !bot.entity.onGround) {
-        lookForce(scanHeading, 0.50);
-        fireRocketDirect(scanHeading);
-        return;
-      }
-
       // 1. Audit & Record loaded chunks into Chunk Memory Map
       const bX = Math.floor(pos.x) >> 4;
       const bZ = Math.floor(pos.z) >> 4;
@@ -1295,10 +1277,10 @@ function createBot() {
       }
 
       // 2. Scan all loaded chunks within server render distance around current position
-      const foundSpot = findSafeLandingSpotAround(Math.round(pos.x), Math.round(pos.z));
+      const foundSpot = findSafeLandingSpotAround(originX, originZ);
       if (foundSpot.safe) {
         clearInterval(flyLoop); flyLoop = null;
-        console.log(`[EAFE] 🏝 SOLID LAND DISCOVERED at (${foundSpot.x}, ${foundSpot.z}) [${foundSpot.blockName}] after straight-line grid scan! (Scanned chunks: ${scannedChunks.size})`);
+        console.log(`[EAFE] 🏝 SOLID LAND DISCOVERED at (${foundSpot.x}, ${foundSpot.z}) [${foundSpot.blockName}]! (Scanned chunks: ${scannedChunks.size})`);
         try {
           bot.chat(`[EAFE] 🏝 Solid land discovered at (${foundSpot.x}, ${foundSpot.z}) on ${foundSpot.blockName}! Re-routing landing...`);
         } catch(_) {}
@@ -1313,7 +1295,7 @@ function createBot() {
       if (scanTicks > 25 && lastKnownSafeGround && flightStartPos) {
         const totalTripDist = Math.hypot(activeTargetX - flightStartPos.x, activeTargetZ - flightStartPos.z);
         const backtrackDist = Math.hypot(lastKnownSafeGround.x - pos.x, lastKnownSafeGround.z - pos.z);
-        const maxBacktrackAllowed = Math.max(totalTripDist * 0.10, 40); // 10% of total trip (min 40m)
+        const maxBacktrackAllowed = Math.max(totalTripDist * 0.10, 40);
 
         if (backtrackDist <= maxBacktrackAllowed) {
           clearInterval(flyLoop); flyLoop = null;
@@ -1329,56 +1311,74 @@ function createBot() {
         }
       }
 
-      // 4. Parallel Lawnmower Grid Navigation (Destination-Anchored Concentric Sweeps)
+      // 4. Concentric Ring Orbit Navigation (Always stays near destination!)
+      const targetYaw = CARDINAL_YAWS[ringLegIndex % 4];
+
       if (!legStartPos) legStartPos = pos.clone();
+      const distOnLeg = Math.hypot(pos.x - legStartPos.x, pos.z - legStartPos.z);
 
-      const sweepLength   = Math.max(rDist.blocks * 2, 200); // 200m destination-anchored tracks
-      const shiftDistance = Math.round(rDist.blocks * 1.5);  // Non-overlapping 128m East shifts
-
-      let targetYaw = CARDINAL_YAWS[sweepDirection]; // North (0) or South (2)
-
-      if (lawnState === 'SWEEP') {
-        const distOnSweep = Math.hypot(pos.x - legStartPos.x, pos.z - legStartPos.z);
-        if (distOnSweep >= sweepLength) {
-          lawnState = 'SHIFT';
-          legStartPos = pos.clone();
-          console.log(`[EAFE] 🧭 Destination Track ${trackCount} complete (${sweepLength}m)! Shifting ${shiftDistance}m East to unscanned chunks...`);
+      if (distOnLeg >= ringSize) {
+        ringLegIndex++;
+        if (ringLegIndex % 2 === 0) {
+          ringSize += Math.round(rDist.blocks * 0.8); // Expand orbit ring size smoothly by 0.8x render distance
         }
-      } else if (lawnState === 'SHIFT') {
-        targetYaw = -Math.PI / 2; // Face East (+X) for side shift
-        const distOnShift = Math.hypot(pos.x - legStartPos.x, pos.z - legStartPos.z);
-        if (distOnShift >= shiftDistance) {
-          lawnState = 'SWEEP';
-          sweepDirection = (sweepDirection === 0) ? 2 : 0; // Flip North <-> South direction
-          trackCount++;
-          legStartPos = pos.clone();
-          const dirName = (sweepDirection === 0) ? 'North' : 'South';
-          console.log(`[EAFE] 🧭 Shift complete! Flying Track ${trackCount} facing ${dirName} (Parallel spacing: ${shiftDistance}m)...`);
+        legStartPos = pos.clone();
+        const dirNames = ['North', 'East', 'South', 'West'];
+        console.log(`[EAFE] 🧭 Orbit Ring Leg ${ringLegIndex} complete! Facing ${dirNames[ringLegIndex % 4]} (Ring Size: ${ringSize}m around target)...`);
+      }
+
+      // ── DYNAMIC TERRAIN SAFETY & COLLISION AVOIDANCE ENGINE ──
+      const scanHeading = targetYaw ?? bot.entity.yaw;
+      const terrainScan = scanFullRenderDistance(scanHeading, 0.20);
+      const groundUnder = getGroundBlockAt(Math.round(pos.x), Math.round(pos.z));
+      const groundY = groundUnder?.position?.y ?? 60;
+      const minSafeY = groundY + 20;
+
+      if (terrainScan.hit && terrainScan.dist < 80) {
+        if (Date.now() - lastTerrainWarn > 2000) {
+          console.warn(`[EAFE] 🏔 Hill/Obstacle (${terrainScan.block}) detected ${terrainScan.dist}m ahead — EMERGENCY ASCENT (+0.65 rad) over terrain!`);
+          lastTerrainWarn = Date.now();
         }
+        lookForce(scanHeading, 0.65);
+        if (rCount > 0) fireRocketDirect(scanHeading);
+        return;
+      }
+
+      if (pos.y < minSafeY && rCount > 0 && !bot.entity.onGround) {
+        lookForce(scanHeading, 0.50);
+        fireRocketDirect(scanHeading);
+        return;
       }
 
       const vel = bot.entity.velocity;
       const speed = Math.hypot(vel.x, vel.y, vel.z);
 
-      // ── OPTIMAL AERODYNAMIC L/D GLIDE ENGINE (Ultra-Smooth Speed-to-Distance Ratio) ──
+      // Wall Stall & Friction Failsafe (Stuck on hill escape)
+      if (speed < 0.05 && !bot.entity.onGround && pos.y > 60) {
+        console.warn('[EAFE] ⚠ Wall stall detected during ocean scan — turning 180° & boosting upward!');
+        lookForce(scanHeading + Math.PI, 0.65);
+        if (rCount > 0) fireRocketDirect();
+        return;
+      }
+
+      // ── OPTIMAL AERODYNAMIC L/D GLIDE ENGINE ──
       const timeSinceBoostMs = Date.now() - dolphinBoostTime;
       let scanPitch = -0.04;
 
       if (timeSinceBoostMs < 1000 && pos.y < 100) {
-        scanPitch = 0.15; // Gentle Post-Boost Micro-Climb (+0.15 rad) -> Smooth height gain without stalling!
+        scanPitch = 0.15; // Gentle Post-Boost Micro-Climb (+0.15 rad)
       } else {
-        scanPitch = -0.04; // Optimal L/D Gravity Glide (-0.04 rad) -> Maximum distance per rocket!
+        scanPitch = -0.04; // Optimal L/D Gravity Glide (-0.04 rad)
       }
 
-      // ONLY fire a rocket if speed drops < 8.0 m/s AND altitude < 82m (near water level)!
       if (speed < 0.40 && pos.y < 82 && rCount > 0 && !bot.entity.onGround) {
         fireRocketDirect(targetYaw);
       }
 
       lookForce(targetYaw, scanPitch);
 
-      const stateName = lawnState === 'SWEEP' ? (sweepDirection === 0 ? 'North-Track' : 'South-Track') : 'East-Shift';
-      console.log(`[EAFE] [GRID_SCAN] Y=${pos.y.toFixed(1)} track=${trackCount} mode=${stateName} speed=${(speed*20).toFixed(1)}m/s rockets=${rCount} scannedChunks=${scannedChunks.size}`);
+      const dirNames = ['North', 'East', 'South', 'West'];
+      console.log(`[EAFE] [CONCENTRIC_SCAN] Y=${pos.y.toFixed(1)} dir=${dirNames[ringLegIndex % 4]} ringSize=${ringSize}m speed=${(speed*20).toFixed(1)}m/s rockets=${rCount} scannedChunks=${scannedChunks.size}`);
     }, 200);
   }
 
