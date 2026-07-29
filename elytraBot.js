@@ -1,29 +1,32 @@
 'use strict';
 /**
- * EAFE v8.0 — Off-Hand Rocket Engine & Full Render Distance Raycast Blueprint
+ * EAFE v8.1 — Full Inventory & Off-Hand Rocket Counting Fix
  * ============================================================================
- * Fixes & Enhancements:
- *   1. Off-Hand Rocket Equipment & Instant Thrust (autoEquipRocket):
+ * Enhancements:
+ *   1. Full Inventory Rocket Counter (countRockets & findRocket):
+ *      - Checks all inventory slots 0..45 including OFF-HAND (slot 45).
+ *      - Ensures equipped off-hand fireworks are accurately counted towards N_req!
+ *   2. Off-Hand Rocket Engine & Instant Thrust (autoEquipRocket):
  *      - Equips firework rockets directly into the OFF-HAND (slot 45).
  *      - Fires rockets via bot.activateItem(true) for 100% reliable server packet handling.
  *      - NO ROCKET SKIPPING DURING CLIMB: Firing rockets continuously every 1.0s
  *        during takeoff & climb prevents aerodynamic stalls and propels the bot
- *        straight up to target altitude Y=160–200!
- *   2. 128m Full Render Distance Terrain Raycast (scanFullRenderDistance):
+ *        straight up to target altitude Y=180!
+ *   3. 128m Full Render Distance Terrain Raycast (scanFullRenderDistance):
  *      - Raycasts 128 meters (8 chunks) along the flight vector.
  *      - If a mountain, hill, or structure intersects the trajectory, automatically
  *        steepens pitch (+0.75 rad) and fires extra rockets to clear terrain safely!
- *   3. Directional Opening Awareness (findBestLaunchHeading):
+ *   4. Directional Opening Awareness (findBestLaunchHeading):
  *      - Scans target direction first, then all 8 compass headings (West 270°, North, East, South).
  *      - Takes off facing open corridor, smoothly curves yaw towards destination in mid-air (Y ≥ 95m).
- *   4. Strict Firework Audit BEFORE Launch:
+ *   5. Strict Firework Audit BEFORE Launch:
  *      - Calculates N_req = ceil(d2d/68.5) + ceil(ΔY/28.0) + 15.
  *      - Aborts & asks in chat if rockets are insufficient.
- *   5. Pathfinder Block Digging (En-Route Only):
+ *   6. Pathfinder Block Digging (En-Route Only):
  *      - Pathfinds to open launch spot breaking path blocks en-route if needed (canDig = true).
- *   6. Spatial Clearance Checkmark (spatialClear = true):
+ *   7. Spatial Clearance Checkmark (spatialClear = true):
  *      - Bypasses re-pathfinding on retries when spatial clearance is approved.
- *   7. Preserved Flight Core (UNTOUCHED):
+ *   8. Preserved Flight Core (UNTOUCHED):
  *      - 150ms Jump Apex Rule Takeoff.
  *      - Native Mineflayer 50ms physics sync with @nxg-org/mineflayer-physics-util.
  */
@@ -132,8 +135,9 @@ function createBot() {
   // ─── Inventory & Off-Hand Firework Equipment ────────────────────────────────
   function countRockets() {
     let count = 0;
-    for (const i of bot.inventory.items()) {
-      if (i.name === 'firework_rocket') {
+    for (let slot = 0; slot <= 45; slot++) {
+      const i = bot.inventory.slots[slot];
+      if (i && i.name === 'firework_rocket') {
         try { if (i.nbt?.value?.Fireworks?.value?.Explosions) continue; } catch(_) {}
         count += i.count;
       }
@@ -142,11 +146,18 @@ function createBot() {
   }
 
   function findRocket() {
-    return bot.inventory.items().find(i => {
-      if (i.name !== 'firework_rocket') return false;
-      try { if (i.nbt?.value?.Fireworks?.value?.Explosions) return false; } catch(_) {}
-      return true;
-    });
+    // Check offhand slot 45 first
+    const offhand = bot.inventory.slots[45];
+    if (offhand && offhand.name === 'firework_rocket') return offhand;
+
+    for (let slot = 0; slot <= 44; slot++) {
+      const i = bot.inventory.slots[slot];
+      if (i && i.name === 'firework_rocket') {
+        try { if (i.nbt?.value?.Fireworks?.value?.Explosions) continue; } catch(_) {}
+        return i;
+      }
+    }
+    return null;
   }
 
   /**
@@ -969,11 +980,11 @@ function createBot() {
 
 // ─── BANNER ──────────────────────────────────────────────────────────────────
 console.log('╔═════════════════════════════════════════════════════════════╗');
-console.log('║  EAFE v8.0 — Off-Hand Rocket & 128m Raycast Engine          ║');
+console.log('║  EAFE v8.1 — Full Inventory & Off-Hand Rocket Counting Fix  ║');
+console.log('║  Slot Audit: Scans slots 0..45 (includes OFF-HAND slot 45)  ║');
 console.log('║  Off-Hand Rockets: Equipped to slot 45 for 100% packet thrust║');
 console.log('║  Continuous Climb: Uninterrupted 1.0s rocket bursts to Y=180 ║');
 console.log('║  128m Raycast: Scans 8 chunks ahead for terrain/mountains  ║');
-console.log('║  Compass Scan: Takes off facing open corridor, turns in sky  ║');
 console.log(`║  Host: ${HOST}:${PORT}`.padEnd(61) + '║');
 console.log('╚═════════════════════════════════════════════════════════════╝');
 
