@@ -1,26 +1,60 @@
 {
   "name": "eafe",
-  "version": "10.23.0",
-  "description": "Autonomous Elytra Flight Engine — protocol-level navigation for long-range autonomous flight in Minecraft",
+  "version": "11.0.0",
+  "description": "Autonomous elytra flight engine for mineflayer — 3 lines to fly anywhere in Minecraft",
   "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js",
+    "./logger": "./src/logger.js",
+    "./constants": "./src/constants.js",
+    "./utils": "./src/utils.js",
+    "./inventory": "./src/core/inventory.js",
+    "./elytra": "./src/core/elytra.js",
+    "./rockets": "./src/core/rockets.js",
+    "./spatial": "./src/flight/spatial.js",
+    "./phases": "./src/flight/phases.js",
+    "./wander": "./src/flight/wander.js",
+    "./landing": "./src/flight/landing.js"
+  },
   "scripts": {
-    "start": "node src/index.js"
+    "start": "node examples/basic.js",
+    "test": "node -e \"require('./src/index.js'); console.log('OK')\""
   },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/eksses/EAFE.git"
   },
-  "keywords": ["minecraft", "elytra", "mineflayer", "autonomous-flight", "bot"],
-  "author": "",
-  "license": "ISC",
+  "keywords": [
+    "minecraft",
+    "elytra",
+    "mineflayer",
+    "bot",
+    "autonomous-flight",
+    "elytra-flying",
+    "mineflayer-plugin",
+    "minecraft-bot"
+  ],
+  "author": "eksses",
+  "license": "MIT",
   "type": "commonjs",
   "bugs": {
     "url": "https://github.com/eksses/EAFE/issues"
   },
   "homepage": "https://github.com/eksses/EAFE#readme",
   "dependencies": {
-    "@nxg-org/mineflayer-physics-util": "^1.9.10",
-    "mineflayer": "^4.37.1",
-    "mineflayer-pathfinder": "^2.4.5"
-  }
+    "mineflayer-pathfinder": "^2.4.5",
+    "vec3": "^1.0.0"
+  },
+  "peerDependencies": {
+    "mineflayer": ">=4.0.0"
+  },
+  "peerDependenciesMeta": {
+    "mineflayer": {
+      "optional": false
+    }
+  },
+  "files": [
+    "src/",
+    "README.md"
+  ]
 }

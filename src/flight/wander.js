@@ -1,5 +1,6 @@
 'use strict';
 
+const { Vec3 } = require('vec3');
 const Logger = require('../logger');
 const { isAir, isSafeSolidBlock } = require('../utils');
 const { MODES, CARDINAL_YAWS } = require('../constants');
@@ -46,33 +47,60 @@ function createWanderEngine(ctx) {
 
   function findSafeLandingSpotAround(centerX, centerZ) {
     const rDist = ctx.spatial.getServerRenderDistance();
-    const maxSearchRadius = rDist.blocks;
+    const maxSearchRadius = Math.min(rDist.blocks, 50);
+    const cx = Math.round(centerX);
+    const cz = Math.round(centerZ);
+    const margin = ctx.state?.landingMargin ?? 2;
 
-    let bestSpot = null;
-    let bestDist = Infinity;
+    function hasOpenAir(x, y, z) {
+      for (let dy = 1; dy <= 3; dy++) {
+        const above = bot.blockAt(new Vec3(x, y + dy, z));
+        if (above && !isAir(above)) return false;
+      }
+      return true;
+    }
 
-    for (let r = 0; r <= maxSearchRadius; r += 2) {
-      const stepAngle = Math.max(Math.PI / 16, Math.PI / (r * 0.5 + 1));
-      for (let angle = 0; angle < Math.PI * 2; angle += stepAngle) {
-        const sx = Math.round(centerX + r * Math.cos(angle));
-        const sz = Math.round(centerZ + r * Math.sin(angle));
-        const sb = ctx.spatial.getGroundBlockAt(sx, sz);
-        if (sb && isSafeSolidBlock(sb)) {
-          const centerSpot = findLandMassCenter(sx, sz);
-          const d = Math.hypot(centerSpot.x - centerX, centerSpot.z - centerZ);
-          if (d < bestDist) {
-            bestDist = d;
-            bestSpot = centerSpot;
+    function isMarginSafe(x, z) {
+      for (let dx = -margin; dx <= margin; dx++) {
+        for (let dz = -margin; dz <= margin; dz++) {
+          const b = ctx.spatial.getGroundBlockAt(x + dx, z + dz);
+          if (!b || !isSafeSolidBlock(b)) return false;
+        }
+      }
+      return true;
+    }
+
+    function checkSpot(x, z) {
+      const b = ctx.spatial.getGroundBlockAt(x, z);
+      if (!b || !isSafeSolidBlock(b)) return null;
+      const gy = (b.position?.y ?? 60) + 1;
+      if (!hasOpenAir(x, gy, z)) return null;
+      if (!isMarginSafe(x, z)) return null;
+      return { x, z, y: gy, blockName: b.name, safe: true };
+    }
+
+    // Check exact target first
+    const exact = checkSpot(cx, cz);
+    if (exact) {
+      Logger.debug(`exact (${cx},${exact.y},${cz}) [${exact.blockName}] margin=${margin}`);
+      return exact;
+    }
+
+    // Fast ring search outward — nearest safe block with margin
+    for (let r = 1; r <= maxSearchRadius; r++) {
+      for (let dx = -r; dx <= r; dx++) {
+        for (let dz = -r; dz <= r; dz++) {
+          if (Math.abs(dx) !== r && Math.abs(dz) !== r) continue;
+          const spot = checkSpot(cx + dx, cz + dz);
+          if (spot) {
+            Logger.debug(`spot (${spot.x},${spot.y},${spot.z}) [${spot.blockName}] r=${r} margin=${margin}`);
+            return spot;
           }
         }
       }
-      if (bestSpot) {
-        Logger.debug(`land d=${bestDist.toFixed(0)}m (${bestSpot.x},${bestSpot.z})`);
-        return bestSpot;
-      }
     }
 
-    return { x: centerX, z: centerZ, blockName: 'unknown', safe: false };
+    return { x: cx, z: cz, y: 64, blockName: 'unknown', safe: false };
   }
 
   function startWanderScan() {

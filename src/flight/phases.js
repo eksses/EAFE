@@ -248,9 +248,10 @@ function createFlightPhases(ctx) {
       }
 
       const d = ctx.dist2D(state.activeTargetX, state.activeTargetZ);
-      if (d < 25) {
+      if (d < 40) {
         clearInterval(ctx.flyLoop); ctx.flyLoop = null;
         clearInterval(ctx.rocketLoop); ctx.rocketLoop = null;
+        clearInterval(ctx.verifyLoop); ctx.verifyLoop = null;
         ctx.startLanding();
         return;
       }

@@ -190,10 +190,8 @@ function createSpatialEngine(ctx) {
   }
 
   function getGroundBlockAt(x, z) {
-    const pos = bot.entity.position;
-    const baseY = Math.floor(pos.y);
-    for (let dy = 5; dy >= -15; dy--) {
-      const b = bot.blockAt(new Vec3(x, baseY + dy, z));
+    for (let y = 256; y >= 0; y--) {
+      const b = bot.blockAt(new Vec3(x, y, z));
       if (b && !isAir(b)) return b;
     }
     return null;

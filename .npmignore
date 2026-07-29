@@ -1,0 +1,11 @@
+legacy/
+analysis/
+docs/
+solutions/
+examples/
+.git/
+.gitignore
+*.html
+*.cmd
+*.md
+!README.md

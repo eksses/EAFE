@@ -1,412 +1,211 @@
-<div align="center">
-
 # EAFE
 
-### Autonomous Elytra Flight Engine
+**Autonomous elytra flight for mineflayer.** 3 lines to fly anywhere in Minecraft.
 
-```
-         _____
-        /     \
-       / () () \      Protocol-level navigation for
-      |  __A__  |     long-range autonomous flight
-       \  ___  /      in Minecraft
-        \_____/
-       /||   ||\      v10.23
-      / ||   || \
-     /  ||   ||  \
-        ||   ||
-       _||_ _||_
-      /________\
+```bash
+npm install eafe
 ```
 
-<br>
+```js
+const { ElytraFlight } = require('eafe');
+const flight = new ElytraFlight(bot);
+flight.fly(500, -1200);
+```
 
-**Zero-to-landing autonomous elytra flight** powered by vanilla physics decomposition,
-anti-spam chat safety, and precision 2x2 platform landing.
-
-[![Node.js](https://img.shields.io/badge/Node.js-18+-339933?logo=node.js&logoColor=white)](https://nodejs.org)
-[![Mineflayer](https://img.shields.io/badge/Mineflayer-4.x-FF6600?logo=minecraft&logoColor=white)](https://github.com/PrismarineJS/mineflayer)
-[![Version](https://img.shields.io/badge/version-10.23-blueviolet)](src/index.js)
-[![License](https://img.shields.io/badge/license-ISC-green)](LICENSE)
-
-</div>
+That's it. Bot takes off, climbs, navigates, avoids terrain, manages rockets, and lands.
 
 ---
 
-## What is EAFE?
+## Install
 
-EAFE is a **Minecraft bot** that flies elytra autonomously from point A to point B.
-No human input needed mid-flight. It handles everything:
+```bash
+npm install eafe mineflayer
+```
 
-```
-  PRE-FLIGHT AUDIT          TAKEOFF            CRUISE           LANDING
- ┌─────────────────┐    ┌───────────┐    ┌──────────────┐    ┌───────────┐
- │ Elytra dur check │───▶│ 150ms jump│───▶│ Rocket mgmt  │───▶│ Spiral    │
- │ Rocket count     │    │ apex rule │    │ Pitch control│    │ search    │
- │ Launch heading   │    │ elytraFly │    │ Terrain scan │    │ Flare     │
- │ Fuel calculation │    │ Rocket #1 │    │ 2s checkups  │    │ Touchdown │
- └─────────────────┘    └───────────┘    └──────────────┘    └───────────┘
-```
+`mineflayer` is a peer dependency — you already have it. `eafe` auto-installs `mineflayer-pathfinder` and `vec3`.
 
 ---
 
 ## Quick Start
 
-### 1. Install
+```js
+const mineflayer = require('mineflayer');
+const { ElytraFlight } = require('eafe');
 
-```bash
-git clone https://github.com/eksses/EAFE.git
-cd EAFE
-npm install
+const bot = mineflayer.createBot({ host: 'localhost', port: 25565, username: 'Bot' });
+
+bot.once('spawn', () => {
+  const flight = new ElytraFlight(bot);
+
+  flight.on('phase', (p) => console.log(p));
+  flight.on('error', (e) => console.error(e.message));
+
+  flight.fly(500, -1200);
+});
 ```
 
-### 2. Configure
+---
 
-Edit `src/config.js`:
+## Flight Modes
 
-```javascript
-module.exports = {
-  HOST: '103.151.60.212',   // Server IP
-  PORT: 25565,              // Server port
-  USERNAME: 'test',         // Bot username
-  DEFAULT_TARGET_X: 100,    // Default flight target X
-  DEFAULT_TARGET_Z: 100,    // Default flight target Z
-  CRUISE_ALT: 180,          // Cruise altitude (Y=180)
-  MAX_RETRIES: 3,           // Max retry attempts
+| Mode | Speed | Fuel | Use |
+|------|-------|------|-----|
+| `FAST` | 22 m/s | ~50m/rocket | Emergency, short hops |
+| `MED` | 13 m/s | ~120m/rocket | Balanced (default) |
+| `LOW` | 10 m/s | ~180m/rocket | Long range, save fuel |
+
+```js
+flight.fly(500, -1200, { mode: 'FAST' });
+// or
+flight.setMode('LOW').fly(500, -1200);
+```
+
+---
+
+## Options
+
+Every option has a default. Only set what you need.
+
+```js
+const flight = new ElytraFlight(bot, {
+  mode: 'MED',          // FAST, MED, LOW
+  cruiseAlt: 180,       // cruise altitude
+  maxRetries: 3,        // retry attempts
+  debug: false,         // verbose logging
+  safety: true,         // pre-flight checks
+  ownerUsername: '',     // whisper alerts to player
+});
+```
+
+---
+
+## Turn Off What You Don't Need
+
+Don't want safety checks? Disable them. Don't want ocean scanning? Disable it. Every module is optional.
+
+```js
+const flight = new ElytraFlight(bot, {
+  safety: false,      // skip elytra/rocket pre-flight checks
+  chunkScan: false,   // skip render distance scanning
+  pathfinding: false, // skip pathfinding to open spots
+  wander: false,      // skip ocean wander scan
+  landing: false,     // skip auto-landing spiral
+  autoRocket: false,  // skip auto rocket firing
+});
+```
+
+---
+
+## Override Anything
+
+Swap any internal function with your own:
+
+```js
+const flight = new ElytraFlight(bot);
+
+// Custom rocket logic
+flight._ctx.smartFireRocket = () => {
+  if (bot.entity.elytraFlying && Math.hypot(...Object.values(bot.entity.velocity)) < 0.8) {
+    bot.activateItem(true);
+    return true;
+  }
+  return false;
+};
+
+// Custom hazard check
+flight._ctx.isHazardous = (block) => {
+  return block?.name?.includes('lava');
+};
+
+// Custom landing
+flight._ctx.startLanding = () => {
+  // your landing logic
 };
 ```
 
-### 3. Run
+---
 
-```bash
-npm start
-```
+## Events
 
-### 4. Fly
-
-Open Minecraft, send a chat message to the bot:
-
-```
-f 500 -1200       ← fly to coordinates (500, -1200)
-s                  ← emergency stop
-m fast             ← switch to fast mode
-status             ← show flight status
+```js
+flight.on('phase', (phase, msg) => {});  // phase changed
+flight.on('stopped', (reason) => {});     // emergency stop
+flight.on('error', (err) => {});          // flight failed
 ```
 
 ---
 
-## Commands
+## API
 
-| Command | Description |
-|---------|-------------|
-| `f [X Z]` | Fly to coordinates X Z (or use defaults) |
-| `setgoal X Z` | Set target without taking off |
-| `m fast` | High speed sprint mode (22 m/s, uses most rockets) |
-| `m med` | Balanced glide mode (13 m/s, 50% fewer rockets) |
-| `m low` | Efficient rocket-saver mode (10 m/s, 80% fuel savings) |
-| `s` / `stop` | Emergency stop all flight |
-| `status` | Display current phase, position, elytra health, rockets |
-| `audit` | Pre-flight resource audit report |
+### `new ElytraFlight(bot, options?)`
+Create flight instance. `bot` is a mineflayer bot.
 
----
+### `flight.fly(x, z, options?)`
+Start flying to coordinates. Returns `this` for chaining.
 
-## How It Works
+### `flight.stop(reason?)`
+Emergency stop. Lands immediately.
 
-### Architecture Overview
+### `flight.setTarget(x, z)`
+Set target without flying.
 
-```
-elytraBot.js
-│
-├── CONFIG ─────────────────────── Server, defaults, flight modes
-│
-├── PHASE STATE MACHINE ────────── 11 flight phases with transitions
-│   IDLE → AUDIT → RELOCATING → TAKEOFF → CLIMBING → CRUISING
-│   → WANDER_SCAN → DEAD_STICK → LANDING → FAILED
-│
-├── SAFETY SYSTEMS ─────────────── Hazard detection, anti-spam chat
-│   ├── isHazardousBlock()        Water/lava/magma detection
-│   ├── isSafeSolidBlock()        Safe landing surface check
-│   └── safeChat()                4s anti-spam cooldown
-│
-├── ELYTRA ENGINE ──────────────── Unbreaking-aware durability tracking
-│   ├── getUnbreakingLevel()      Detect enchantment level (0-3)
-│   ├── calculateRequiredElytraDurability()  Pre-flight durability calc
-│   ├── auditAndEquipElytra()     Auto-swap to best spare
-│   └── checkMidFlightElytraSwap() In-flight durability monitor
-│
-├── ROCKET ENGINE ──────────────── Smart firework management
-│   ├── countRockets()            Count non-explosive rockets
-│   ├── autoEquipRocket()         Equip to off-hand slot 45
-│   ├── fireRocketDirect()        Packet-based off-hand activation
-│   └── shouldFireRocketDynamic() Physics-based fuel need check
-│
-├── FLIGHT PHYSICS ─────────────── Vanilla-accurate per-tick model
-│   ├── isFlying()                Server + simulation state check
-│   ├── scanFullRenderDistance()   Raycast obstacle detection
-│   └── findBestLaunchHeading()   8-directional clearance scan
-│
-├── NAVIGATION ─────────────────── Multi-phase flight control
-│   ├── startClimb()              Steep ascent to cruise altitude
-│   ├── startCruise()             Level flight with periodic checks
-│   ├── startWanderScan()         Ocean search with chunk memory
-│   └── startLanding()            Spiral scan + flare touchdown
-│
-└── COMMAND PROCESSOR ──────────── Chat + terminal stdin input
-```
+### `flight.setMode(mode)`
+Set flight mode: `'FAST'`, `'MED'`, `'LOW'`.
 
-### Vanilla Physics Model
+### `flight.setStatus(x, z)`
+Get current status object.
 
-EAFE implements the **exact 3-step velocity update loop** from Minecraft's decompiled `LivingEntity.travel()`, executed every 50ms tick:
+### `flight.preflight()`
+Run pre-flight checks without flying. Returns `{ ok, elytra, rockets }`.
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                    PER-TICK VELOCITY UPDATE                      │
-├─────────────────────────────────────────────────────────────────┤
-│                                                                  │
-│  STEP 1: Kinetic Pitch Energy Exchange                          │
-│  ├─ Nose UP (pitch < 0): Horizontal momentum → Vertical lift   │
-│  └─ Nose DOWN (pitch > 0): Fall speed → Horizontal thrust      │
-│                                                                  │
-│  STEP 2: Impulse, Gravity & Passive Wing Lift                   │
-│  ├─ + Rocket thrust impulse (if active)                         │
-│  ├─ − Gravity (g = 0.08 blocks/tick²)                           │
-│  └─ + Passive wing lift (cos²(pitch) × 0.06)                   │
-│                                                                  │
-│  STEP 3: Axis-Decoupled Drag Scaling                            │
-│  ├─ Horizontal (X, Z) × 0.99                                    │
-│  └─ Vertical (Y)     × 0.98  ← Critical: NOT the same!         │
-│                                                                  │
-└─────────────────────────────────────────────────────────────────┘
-```
+### `flight.phase`
+Current phase string.
 
-> **Why axis-decoupled drag matters:** Using a unified 0.99 on all axes causes vertical
-> position drift over long distances. The bot would descend slower than vanilla,
-> accumulating error until it rubber-bands back. EAFE matches vanilla exactly.
-
-### Flight Modes Compared
-
-| Mode | Pitch | Speed | Fuel Efficiency | Use Case |
-|------|-------|-------|-----------------|----------|
-| **FAST** | +0.02 rad | 22 m/s | ~50m per rocket | Emergency transit, short hops |
-| **MEDIUM** | −0.04 rad | 13 m/s | ~120m per rocket | Default balanced flight |
-| **EFFICIENT** | −0.05 rad | 10 m/s | ~180m per rocket | Long-range, fuel-scarce |
-
-The pitch values control the **L/D (lift-to-drag) glide ratio**:
-- Nose-down pitches convert altitude into forward speed
-- Nose-up pitches (post-boost) convert speed back into altitude
-- The bot oscillates between these phases for optimal energy cruise
+### `flight.isFlying`
+Boolean — is the bot currently in elytra flight?
 
 ---
 
-## Safety Systems
+## Import Modules Individually
 
-### Elytra Durability Management
+Use only what you need:
 
-```
-┌────────────────────────────────────────────────────────────────┐
-│  PRE-FLIGHT DURABILITY AUDIT                                    │
-│                                                                 │
-│  1. Scan equipped elytra (slot 6)                              │
-│  2. If durability ≤ 10 → auto-swap to best spare              │
-│  3. Sum durability across ALL elytras in inventory             │
-│  4. Calculate required durability for flight distance          │
-│     reqDur = ceil(distance / speed) × damageRate + 15 buffer  │
-│  5. Block launch if insufficient                               │
-│                                                                 │
-│  MID-FLIGHT MONITOR (every tick)                               │
-│  • If equipped elytra drops ≤ 10 dur → hot-swap spare          │
-│  • Re-activate elytra fly + rocket boost after swap            │
-│  • If no spares → emergency landing                            │
-└────────────────────────────────────────────────────────────────┘
+```js
+const { countRockets, getElytraSummary, isSafeSolidBlock, Logger } = require('eafe');
 ```
 
-The **Unbreaking enchantment** is factored in:
-
-| Unbreaking Level | Damage Rate | Effective Durability |
-|-----------------|-------------|---------------------|
-| None | 1.00 dur/sec | 432 ticks |
-| I | 0.50 dur/sec | 864 ticks (2x) |
-| II | 0.33 dur/sec | 1296 ticks (3x) |
-| III | 0.25 dur/sec | 1728 ticks (4x) |
-
-### Anti-Spam Chat Engine
-
-```
-bot.chat() calls are rate-limited to ONE message per 4 seconds.
-
-  Thread:  safeChat("[EAFE] Climbing...")
-           safeChat("[EAFE] Cruise")     ← BLOCKED (2.1s elapsed)
-           ... 4.0s later ...
-           safeChat("[EAFE] Cruise")     ← SENT
-```
-
-This completely eliminates **"Kicked for spamming"** server kicks during
-status broadcasts and low-health alerts.
-
-### Terrain Collision Avoidance
-
-```
-          scanFullRenderDistance()
-                    │
-         Cast ray along flight vector
-         up to server render distance
-                    │
-            ┌───────┴───────┐
-            │               │
-        Hit detected    Clear path
-            │               │
-     Steepen pitch     Continue
-     (+0.65 / +0.75)   level flight
-     Fire rocket
-     to climb over
-```
-
-The bot dynamically measures the server's **real-time render distance**
-by auditing loaded chunk columns, then raycasts that full distance ahead.
+Available exports:
+- `ElytraFlight` — main class
+- `MODES`, `PHASE` — constants
+- `Logger` — debug logger
+- `countRockets`, `findRocket`, `autoEquipRocket` — inventory
+- `getElytraSummary`, `auditAndEquipElytra`, `calculateRequiredElytraDurability` — elytra
+- `isAir`, `isHazardousBlock`, `isSafeSolidBlock`, `angleDiff`, `sleep` — utils
 
 ---
 
-## Landing System
+## Sub-Path Imports
 
-### 3-Phase Landing Sequence
-
-```
-PHASE 1: ARRIVAL SCAN
-  └─ Find nearest safe solid block within server render distance
-     └─ Calculate geometric center of land mass (2x2+ platforms supported)
-
-PHASE 2: DESCENT
-  └─ If target is ocean → enter WANDER_SCAN (concentric ring ocean search)
-     └─ Expanding rings around goal, chunk memory map tracks scanned areas
-
-PHASE 3: TOUCHDOWN
-  ├─ Y > ground+4: Nose DOWN glide (−0.30 rad)
-  ├─ Y ≤ ground+4: Nose UP flare (+0.10 rad) + sneak
-  └─ onGround = true: Mission complete
-```
-
-### Land Mass Center Detection
-
-The `findLandMassCenter()` function maps the bounding box of any solid
-platform (even 2x2 blocks) and calculates the **exact geometric centroid**
-to ensure the bot lands in the middle, away from edges:
-
-```
-  ┌──────────┐
-  │ ░░░░░░░░ │
-  │ ░░░░░░░░ │     Scans 15 blocks in each direction
-  │ ░░░╳░░░░ │  ←  ╳ = calculated center (Target X, Target Z)
-  │ ░░░░░░░░ │
-  │ ░░░░░░░░ │
-  └──────────┘
-     2x2 minimum supported!
+```js
+const Logger = require('eafe/logger');
+const { MODES } = require('eafe/constants');
+const { countRockets } = require('eafe/inventory');
 ```
 
 ---
 
-## Ocean Search (Wander Scan)
-
-When the destination is over water, EAFE enters a **concentric ring search**:
+## Examples
 
 ```
-                    ╔═══════════════════╗
-                    ║   DESTINATION     ║
-                    ║   (X, Z)          ║
-                    ╚═══════╤═══════════╝
-                            │
-              ┌─────────────┼─────────────┐
-              │  RING 1: 40m radius      │
-              │  Fly N → E → S → W      │
-              │  Scan loaded chunks      │
-              └─────────────┬─────────────┘
-                            │ No land found
-              ┌─────────────┼─────────────┐
-              │  RING 2: +80m radius     │
-              │  Expand search outward   │
-              └─────────────┬─────────────┘
-                            │
-                         Continue...
+examples/
+├── basic.js         — 10 lines, fly somewhere
+├── advanced.js      — options, events, status loop
+├── custom.js        — override modules, custom modes
+└── preflight.js     — check resources without flying
 ```
-
-**Chunk Memory Map** prevents re-scanning the same areas.
-A **10% backtrack limit** reroutes to the last known safe coastline
-if the bot flies too far from its starting position.
-
----
-
-## Dependencies
-
-| Package | Purpose |
-|---------|---------|
-| `mineflayer` | Minecraft bot framework (protocol-level) |
-| `mineflayer-pathfinder` | A* ground pathfinding for relocation |
-| `@nxg-org/mineflayer-physics-util` | Client-side physics simulation engine |
-
----
-
-## Project Structure
-
-```
-EAFE/
-├── src/                          ← Modular source code
-│   ├── index.js                  ← Main entry & orchestrator
-│   ├── config.js                 ← Server & default configuration
-│   ├── constants.js              ← Flight modes, phases, surfaces
-│   ├── utils.js                  ← sleep(), isAir(), angleDiff()
-│   ├── commands.js               ← Chat & terminal command processor
-│   ├── core/
-│   │   ├── chat.js               ← Anti-spam safeChat(), setPhase()
-│   │   ├── inventory.js          ← Rocket counting, off-hand equip
-│   │   ├── elytra.js             ← Durability audit, Unbreaking calc
-│   │   └── rockets.js            ← Firework firing, physics eval
-│   └── flight/
-│       ├── spatial.js            ← Raycast, runway check, pathfinding
-│       ├── phases.js             ← Takeoff, climb, cruise phases
-│       ├── wander.js             ← Ocean search, chunk memory
-│       └── landing.js            ← Spiral scan, flare touchdown
-├── legacy/
-│   └── elytraBot.js              ← Original monolithic version
-├── package.json
-├── package-lock.json
-├── .gitignore
-└── README.md
-```
-
----
-
-## How the Code is Organized
-
-The single `elytraBot.js` file is structured in clear sections:
-
-| Lines | Section | What It Does |
-|-------|---------|-------------|
-| 1–58 | Config & Modes | Server address, flight mode definitions |
-| 60–78 | Phase State | 11-state FSM, hazard surface definitions |
-| 89–126 | Utilities | `sleep()`, `isAir()`, `isHazardousBlock()`, `angleDiff()` |
-| 128–168 | Bot Factory | `createBot()` — session state, timer cleanup |
-| 170–196 | Chat & Stop | Anti-spam `safeChat()`, `emergencyStop()` |
-| 206–237 | Render Distance | Dynamic server view distance detection |
-| 239–288 | Inventory | Rocket counting, off-hand equip, `findRocket()` |
-| 289–445 | Elytra Engine | Unbreaking audit, durability calc, mid-flight swap |
-| 447–567 | Navigation | Yaw/pitch helpers, rocket firing, physics checks |
-| 569–760 | Spatial Scan | Raycast, runway check, pathfinding, launch heading |
-| 762–1015 | Flight Phases | Takeoff, climb, cruise with rocket management |
-| 1141–1392 | Ocean Search | Wander scan, concentric rings, chunk memory |
-| 1394–1486 | Landing | Spiral search, flare touchdown, retry mechanism |
-| 1487–1566 | Commands | Chat/terminal command processor |
-| 1568–1679 | Spawn & Init | Event listeners, auto-equip, disconnect handler |
 
 ---
 
 ## License
 
-ISC
-
----
-
-<div align="center">
-
-*Built with vanilla physics decomposition.*
-*Every tick, every block, every rocket — calculated.*
-
-</div>
+MIT
