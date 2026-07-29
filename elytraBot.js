@@ -1,21 +1,19 @@
 'use strict';
 /**
- * EAFE v10.17 — Low-Altitude Ocean Floor Scan & Destination-Anchored Grid Engine
+ * EAFE v10.18 — 3-Layer Dynamic Terrain Safety & Adaptive Clearance Engine
  * ====================================================================================
  * Enhancements:
- *   1. Low-Altitude Scan Ceiling (Y = 85m to 95m):
- *      - Drops ocean scan altitude ceiling to Y=90m (30m above sea level), giving crystal-clear,
- *        unobstructed line-of-sight to the ocean floor and surrounding land chunks!
- *   2. Destination-Anchored Concentric Sweeps:
- *      - Anchors parallel lawnmower tracks directly over the target destination coordinates (activeTargetX, activeTargetZ).
- *      - Scans target location and immediate surrounding chunks FIRST (e.g. discovers land at 30, 70 in 2s
- *        when target is 50, 70 instead of flying 800m away)!
- *   3. Non-Overlapping Chunk Step (128m East Shift):
- *      - Every parallel track shift is offset by 1.5x render distance (128m), stepping into the center of
- *        100% UNSCANNED chunk blocks with ZERO re-scanning overlap!
- *   4. Ultra-Low Fireworks Sine-Wave Dolphin Oscillation:
- *      - 1 rocket boost pushes bot up +15m -> pitch down (-0.12 rad) glides 200m+ at 24 m/s on pure gravity!
- *      - Requires speed < 8.0 m/s AND Y < 82m before firing a rocket (1 rocket per 200m+ glide)!
+ *   1. 3-Layer Dynamic Terrain Safety & Collision Avoidance Engine:
+ *      - Layer 1 (128m Raycast Lookahead): Scans 128m ahead along flight yaw. If any hill, cliff, mountain,
+ *        tree, or structure is detected within 80m, IMMEDIATELY engages EMERGENCY ASCENT (+0.65 rad pitch)
+ *        and rocket boost to fly smoothly OVER the obstacle!
+ *      - Layer 2 (Adaptive Terrain Floor Elevation Clearance): Dynamically tracks ground height under and ahead of
+ *        the bot (groundY). Automatically maintains a minimum 20m safety clearance buffer above ground floor (Y >= groundY + 20).
+ *      - Layer 3 (Wall Stall & Touchdown Failsafe): Touchdown on solid non-hazard blocks halts scan immediately.
+ *   2. Low-Altitude Ocean Scan (Y = 85m to 95m):
+ *      - Provides direct, unobstructed line-of-sight to ocean floor & surrounding land chunks over open water.
+ *   3. Destination-Anchored Concentric Sweeps:
+ *      - Scans target destination & surrounding chunks FIRST before expanding outward.
  *
  * Commands: f [X Z], setgoal X Z, m fast/med/low, s, status, audit.
  */
@@ -1265,6 +1263,31 @@ function createBot() {
           try { bot.chat(`[EAFE] ${landingMsg}`); } catch(_) {}
           return;
         }
+      }
+
+      // ── DYNAMIC TERRAIN SAFETY & COLLISION AVOIDANCE ENGINE ──
+      // 1. Raycast Obstacle Scan (128m lookahead along flight yaw)
+      const scanHeading = targetYaw ?? bot.entity.yaw;
+      const terrainScan = scanFullRenderDistance(scanHeading, 0.20);
+      const groundUnder = getGroundBlockAt(Math.round(pos.x), Math.round(pos.z));
+      const groundY = groundUnder?.position?.y ?? 60;
+      const minSafeY = groundY + 20; // Maintain at least 20m clearance above ground floor
+
+      if (terrainScan.hit && terrainScan.dist < 80) {
+        if (Date.now() - lastTerrainWarn > 2000) {
+          console.warn(`[EAFE] 🏔 Hill/Obstacle (${terrainScan.block}) detected ${terrainScan.dist}m ahead — EMERGENCY ASCENT (+0.65 rad) over terrain!`);
+          lastTerrainWarn = Date.now();
+        }
+        lookForce(scanHeading, 0.65);
+        if (rCount > 0) fireRocketDirect(scanHeading);
+        return; // Pause low-altitude dive until obstacle is cleared!
+      }
+
+      // 2. Adaptive Terrain Clearance: If terrain elevation rises under bot (Y < groundY + 20), climb up!
+      if (pos.y < minSafeY && rCount > 0 && !bot.entity.onGround) {
+        lookForce(scanHeading, 0.50);
+        fireRocketDirect(scanHeading);
+        return;
       }
 
       // 1. Audit & Record loaded chunks into Chunk Memory Map
