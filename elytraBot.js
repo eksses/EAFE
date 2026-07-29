@@ -1,20 +1,18 @@
 'use strict';
 /**
- * EAFE v10.9 — Elytra Auto-Swap Hysteresis Failsafe & Log De-clutter
+ * EAFE v10.10 — Strict <= 10 Durability Elytra Auto-Swap Threshold Rule
  * ====================================================================================
  * Enhancements:
- *   1. Elytra Auto-Swap Hysteresis Failsafe (auditAndEquipElytra):
- *      - Fixed 1-durability ping-pong thrashing mid-flight!
- *      - Enforced 30-durability hysteresis threshold: Only swaps if spare Elytra has at least
- *        30 MORE durability points, OR if equipped Elytra drops to <= 15 points!
- *      - Eliminated repeated log spam "[EAFE] ✓ Equipped Elytra is optimal".
- *   2. Phase-Restricted Inventory Listeners:
- *      - Restricted playerCollect and updateSlot auto-equip triggers strictly to PHASE.IDLE so armor
- *        swaps are never invoked continuously mid-air.
- *   3. Smooth Takeoff & Takeoff Kinetic Energy Protection:
- *      - Smooth 0.45 -> 0.65 rad pitch ramp & 5-tick climb grace period.
- *   4. Parallel Lawnmower Grid Search & 10% Backtrack Limit Rule:
- *      - Boustrophedon 300m parallel sweeps with 128m East shifts and 10% backtrack limit.
+ *   1. Strict <= 10 Durability Elytra Auto-Swap Threshold Rule:
+ *      - The bot ONLY swaps Elytras if the currently equipped Elytra has 10 or less durability points!
+ *      - As long as the equipped Elytra has > 10 durability (e.g. 426/432), it will NEVER swap pre-flight
+ *        or mid-flight, eliminating all armor-swap thrashing and logs!
+ *      - When equipped Elytra reaches <= 10 durability points, auto-swaps to the highest durability
+ *        spare in inventory, re-sends elytraFly() packet, and fires an off-hand rocket boost.
+ *   2. Smooth Takeoff Kinetic Energy Protection & 5-Tick Grace Period:
+ *      - Ramps pitch smoothly (0.45 -> 0.65 rad) on takeoff climb with 1.0s grace period.
+ *   3. Parallel Lawnmower Grid Search Engine (Boustrophedon Pattern):
+ *      - 300m parallel straight tracks with 128m East shifts and 10% backtrack limit rule.
  *
  * Commands: f [X Z], setgoal X Z, m fast/med/low, s, status, audit.
  */
@@ -310,74 +308,68 @@ function createBot() {
   }
 
   /**
-   * Scans all slots (including equipped slot 6) and automatically equips the
-   * Elytra with the HIGHEST remaining durability!
+   * Scans inventory and equips best Elytra ONLY if currently equipped Elytra has <= 10 durability points!
    */
   async function auditAndEquipElytra() {
-    let bestSlot = null;
-    let bestDur  = -1;
-    let currentEquippedDur = -1;
-
-    // Check equipped chest slot (slot 6)
     const chest = bot.inventory.slots[6];
+    let currentEquippedDur = -1;
     if (chest?.name === 'elytra') {
       currentEquippedDur = chest.maxDurability ? (chest.maxDurability - chest.durabilityUsed) : 432;
-      bestSlot = 6;
-      bestDur  = currentEquippedDur;
     }
 
-    // Check all inventory slots for a significantly higher durability Elytra
+    // STRICT USER RULE: Only swap if currently equipped Elytra is missing OR has 10 or less durability points!
+    if (currentEquippedDur > 10) {
+      return true;
+    }
+
+    // Equipped Elytra is <= 10 points (or missing) — find highest durability spare in inventory!
+    let bestSlot = null;
+    let bestDur  = -1;
+
     for (let s = 0; s <= 45; s++) {
       if (s === 6) continue;
       const item = bot.inventory.slots[s];
       if (item && item.name === 'elytra') {
         const dur = item.maxDurability ? (item.maxDurability - item.durabilityUsed) : 432;
-        // Hysteresis Failsafe: Only swap if spare Elytra has at least 30 MORE durability points
-        // OR if currently equipped Elytra is depleted (<= 15 points)!
-        if (dur > (currentEquippedDur + 30) || currentEquippedDur <= 15) {
-          if (dur > bestDur) {
-            bestDur  = dur;
-            bestSlot = s;
-          }
+        if (dur > bestDur && dur > 10) {
+          bestDur  = dur;
+          bestSlot = s;
         }
       }
     }
 
-    if (bestSlot === null || bestDur <= 15) {
-      console.warn(`[EAFE] ⚠ No usable Elytra found (durability > 15). Highest available: ${bestDur > 0 ? bestDur : 0}/432`);
+    if (bestSlot === null) {
+      console.warn(`[EAFE] ⚠ No usable spare Elytra found (durability > 10). Currently equipped: ${currentEquippedDur > 0 ? currentEquippedDur : 0}/432`);
       try {
-        bot.chat(`[EAFE] ⚠ Elytra health critical! Highest: ${bestDur > 0 ? bestDur : 0}/432 points. Please give me a fresh Elytra!`);
+        bot.chat(`[EAFE] ⚠ Elytra health critical (${currentEquippedDur > 0 ? currentEquippedDur : 0}/432)! Please give me a fresh Elytra!`);
       } catch(_) {}
       return false;
     }
 
-    // If a significantly better Elytra is in inventory (not chest slot 6), auto-swap to it!
-    if (bestSlot !== 6) {
-      const spareItem = bot.inventory.slots[bestSlot];
-      try {
-        await bot.equip(spareItem, 'torso');
-        console.log(`[EAFE] 🎽 Auto-swapped to best Elytra from slot ${bestSlot} (Durability: ${bestDur}/432 vs old ${currentEquippedDur}/432)`);
-        try { bot.chat(`[EAFE] 🎽 Auto-swapped to best Elytra (${bestDur}/432 durability)`); } catch(_) {}
-      } catch(e) {
-        console.error('[EAFE] ✗ Equip best elytra failed:', e.message);
-        return false;
-      }
+    // Auto-swap to best spare Elytra from inventory into chest slot 6
+    const spareItem = bot.inventory.slots[bestSlot];
+    try {
+      await bot.equip(spareItem, 'torso');
+      console.log(`[EAFE] 🎽 Auto-swapped to best Elytra from slot ${bestSlot} (Durability: ${bestDur}/432, old was ${currentEquippedDur}/432)`);
+      try { bot.chat(`[EAFE] 🎽 Auto-swapped to best Elytra (${bestDur}/432 durability)`); } catch(_) {}
+      return true;
+    } catch(e) {
+      console.error('[EAFE] ✗ Equip best elytra failed:', e.message);
+      return false;
     }
-
-    return true;
   }
 
   /**
    * Mid-Flight Elytra Auto-Swap & Flight State Recovery Failsafe
-   * Triggers when equipped Elytra drops <= 15 durability points during active flight.
+   * Triggers ONLY when equipped Elytra drops to <= 10 durability points during active flight.
    */
   async function checkMidFlightElytraSwap() {
     const chest = bot.inventory.slots[6];
     if (!chest || chest.name !== 'elytra') return;
 
     const dur = chest.maxDurability ? (chest.maxDurability - chest.durabilityUsed) : 432;
-    if (dur <= 15) {
-      console.warn(`[EAFE] 🎽 Equipped Elytra durability low (${dur}/432) — executing mid-flight auto-swap!`);
+    if (dur <= 10) {
+      console.warn(`[EAFE] 🎽 Equipped Elytra durability critical (${dur}/432) — executing mid-flight auto-swap!`);
       const swapped = await auditAndEquipElytra();
       if (swapped) {
         console.log('[EAFE] 🎽 Mid-flight Elytra swapped — re-issuing elytraFly() & rocket boost!');
@@ -385,7 +377,7 @@ function createBot() {
         fireRocketDirect();
       } else {
         console.error('[EAFE] ⚠ Out of spare Elytras! Emergency landing initiated...');
-        try { bot.chat('[EAFE] ⚠ Elytra durability low & no spares! Emergency landing!'); } catch(_) {}
+        try { bot.chat('[EAFE] ⚠ Elytra durability critical (<=10) & no spares! Emergency landing!'); } catch(_) {}
         startLanding();
       }
     }
