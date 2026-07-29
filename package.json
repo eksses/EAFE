@@ -1,19 +1,16 @@
 {
-  "name": "efly",
-  "version": "1.0.0",
-  "description": "> Protocol-level navigation for autonomous flight in Minecraft",
-  "main": "index.js",
-  "directories": {
-    "doc": "docs"
-  },
+  "name": "eafe",
+  "version": "10.23.0",
+  "description": "Autonomous Elytra Flight Engine — protocol-level navigation for long-range autonomous flight in Minecraft",
+  "main": "elytraBot.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "start": "node elytraBot.js"
   },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/eksses/EAFE.git"
   },
-  "keywords": [],
+  "keywords": ["minecraft", "elytra", "mineflayer", "autonomous-flight", "bot"],
   "author": "",
   "license": "ISC",
   "type": "commonjs",
