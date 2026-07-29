@@ -1,9 +1,9 @@
 'use strict';
 /**
- * EAFE v9.3 — Empirically Verified 1000% Accurate Firework Fuel Engine
- * ============================================================================
- * Fuel Formula Calibration:
- *   N_req = N_distance + N_climb + N_reserve
+ * EAFE v9.4 — Retry Failure Rocket Waste Buffer & Empirically Verified Fuel Engine
+ * =================================================================================
+ * Fuel Formula Calibration (Includes Failed Takeoff/Climb Retry Buffer):
+ *   N_req = N_distance + N_climb + N_retry_waste + N_landing_reserve
  *   - N_distance:
  *       FAST Mode:      d2D / 35.0   (30 m/s sprint)
  *       MEDIUM Mode:    d2D / 65.0   (22 m/s balanced)
@@ -11,8 +11,11 @@
  *   - N_climb:
  *       ceil(|ΔY| / 10.0) — Empirically calibrated climb efficiency of ~10.0m
  *       altitude gain per rocket at steep pitch (+0.65 rad).
- *   - N_reserve:
- *       10 fireworks safety buffer for Archimedean spiral landing & ping spikes.
+ *   - N_retry_waste:
+ *       (MAX_RETRIES * 3) = 9 rockets buffer explicitly allocated for potential
+ *       takeoff or climb failures during retries.
+ *   - N_landing_reserve:
+ *       5 rockets reserve for Archimedean landing spiral & 128m terrain avoidance.
  *
  * Core Failsafes:
  *   1. Best Elytra Auto-Swap: Scans all slots (0..45) & equips highest durability Elytra.
@@ -303,14 +306,15 @@ function createBot() {
   }
 
   /**
-   * Empirically Verified Firework Fuel Calculation
-   * N_req = N_distance + N_climb + N_reserve
+   * Empirically Verified Firework Fuel Calculation (Includes Retry Failure Waste Buffer)
+   * N_req = N_distance + N_climb + N_retry_waste + N_landing_reserve
    */
   function calculateRequiredRockets(d2d, deltaY) {
     const dReq = Math.ceil(d2d / currentMode.fuelDistDivider);
-    const yReq = Math.ceil(Math.abs(deltaY) / 10.0); // 10.0m altitude gain per rocket at +0.65 pitch
-    const reserve = 10;
-    return dReq + yReq + reserve;
+    const yReq = Math.ceil(Math.abs(deltaY) / 10.0);
+    const retryWasteBuffer = MAX_RETRIES * 3; // 9 rockets buffer for up to 3 failed takeoff/climb retries
+    const landingReserve   = 5;               // 5 rockets reserve for landing & terrain avoidance
+    return dReq + yReq + retryWasteBuffer + landingReserve;
   }
 
   /**
@@ -1097,11 +1101,11 @@ function createBot() {
 
 // ─── BANNER ──────────────────────────────────────────────────────────────────
 console.log('╔═════════════════════════════════════════════════════════════╗');
-console.log('║  EAFE v9.3 — Empirically Verified 1000% Accurate Fuel Engine║');
-console.log('║  Fuel Formula: N_req = N_distance + N_climb + N_reserve     ║');
+console.log('║  EAFE v9.4 — Retry Failure Rocket Waste Buffer & Fuel Engine║');
+console.log('║  Retry Buffer: (MAX_RETRIES * 3) = 9 rockets for failed retries║');
+console.log('║  Fuel Formula: N_req = N_dist + N_climb + N_retry + N_land  ║');
 console.log('║  Climb Efficiency: ~10.0m altitude gain per rocket (+0.65)  ║');
 console.log('║  Modes: FAST (35m/rk), MEDIUM (65m/rk), EFFICIENT (110m/rk)  ║');
-console.log('║  Best Elytra Auto-Swap: Auto-equips highest durability      ║');
 console.log(`║  Host: ${HOST}:${PORT}`.padEnd(61) + '║');
 console.log('╚═════════════════════════════════════════════════════════════╝');
 
