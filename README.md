@@ -1,18 +1,16 @@
-# EAFE
+<div align="center">
 
-**Autonomous elytra flight for mineflayer.** 3 lines to fly anywhere in Minecraft.
+# ⚡ EAFE
 
-```bash
-npm install eafe
-```
+**E**lytra **A**utonomous **F**light **E**ngine
 
-```js
-const { ElytraFlight } = require('eafe');
-const flight = new ElytraFlight(bot);
-flight.fly(500, -1200);
-```
+[![npm](https://img.shields.io/npm/v/eafe?color=blue)](https://www.npmjs.com/package/eafe)
+[![License](https://img.shields.io/npm/l/eafe)](LICENSE)
+[![Downloads](https://img.shields.io/npm/dm/eafe)](https://www.npmjs.com/package/eafe)
 
-That's it. Bot takes off, climbs, navigates, avoids terrain, manages rockets, and lands.
+*3 lines to fly anywhere in Minecraft*
+
+</div>
 
 ---
 
@@ -22,105 +20,88 @@ That's it. Bot takes off, climbs, navigates, avoids terrain, manages rockets, an
 npm install eafe mineflayer
 ```
 
-`mineflayer` is a peer dependency — you already have it. `eafe` auto-installs `mineflayer-pathfinder` and `vec3`.
-
----
-
 ## Quick Start
 
 ```js
 const mineflayer = require('mineflayer');
 const { ElytraFlight } = require('eafe');
 
-const bot = mineflayer.createBot({ host: 'localhost', port: 25565, username: 'Bot' });
+const bot = mineflayer.createBot({ host: 'localhost', username: 'Bot' });
 
 bot.once('spawn', () => {
   const flight = new ElytraFlight(bot);
-
-  flight.on('phase', (p) => console.log(p));
-  flight.on('error', (e) => console.error(e.message));
-
-  flight.fly(500, -1200);
+  flight.fly(500, 500);
 });
 ```
 
 ---
 
-## Flight Modes
+## Features
 
-| Mode | Speed | Fuel | Use |
-|------|-------|------|-----|
-| `FAST` | 22 m/s | ~50m/rocket | Emergency, short hops |
-| `MED` | 13 m/s | ~120m/rocket | Balanced (default) |
-| `LOW` | 10 m/s | ~180m/rocket | Long range, save fuel |
-
-```js
-flight.fly(500, -1200, { mode: 'FAST' });
-// or
-flight.setMode('LOW').fly(500, -1200);
-```
-
----
-
-## Options
-
-Every option has a default. Only set what you need.
-
-```js
-const flight = new ElytraFlight(bot, {
-  mode: 'MED',          // FAST, MED, LOW
-  cruiseAlt: 180,       // cruise altitude
-  maxRetries: 3,        // retry attempts
-  debug: false,         // verbose logging
-  safety: true,         // pre-flight checks
-  ownerUsername: '',     // whisper alerts to player
-});
-```
+| Feature | Description |
+|---------|-------------|
+| `FAST` | 30 m/s — emergency flights |
+| `MED` | 22 m/s — balanced speed/fuel |
+| `LOW` | 15 m/s — fuel efficient |
+| Smart Landing | Auto land at safe spots |
+| Elytra Audit | Checks durability before flight |
+| Auto Rocket | Equips rockets automatically |
+| Terrain Avoidance | Scans and avoids obstacles |
+| Owner Alerts | Whisper notifications |
 
 ---
 
-## Turn Off What You Don't Need
+## API
 
-Don't want safety checks? Disable them. Don't want ocean scanning? Disable it. Every module is optional.
+### `flight.fly(x, z, opts?)`
+
+Fly to coordinates.
 
 ```js
-const flight = new ElytraFlight(bot, {
-  safety: false,      // skip elytra/rocket pre-flight checks
-  chunkScan: false,   // skip render distance scanning
-  pathfinding: false, // skip pathfinding to open spots
-  wander: false,      // skip ocean wander scan
-  landing: false,     // skip auto-landing spiral
-  autoRocket: false,  // skip auto rocket firing
-});
+flight.fly(500, 500);
+flight.fly(500, 500, { mode: 'FAST', cruiseAlt: 200 });
 ```
 
----
+### `flight.stop(reason?)`
 
-## Override Anything
-
-Swap any internal function with your own:
+Emergency stop.
 
 ```js
-const flight = new ElytraFlight(bot);
+flight.stop();
+```
 
-// Custom rocket logic
-flight._ctx.smartFireRocket = () => {
-  if (bot.entity.elytraFlying && Math.hypot(...Object.values(bot.entity.velocity)) < 0.8) {
-    bot.activateItem(true);
-    return true;
-  }
-  return false;
-};
+### `flight.setMode(mode)`
 
-// Custom hazard check
-flight._ctx.isHazardous = (block) => {
-  return block?.name?.includes('lava');
-};
+Change flight mode.
 
-// Custom landing
-flight._ctx.startLanding = () => {
-  // your landing logic
-};
+```js
+flight.setMode('FAST'); // FAST, MED, LOW
+```
+
+### `flight.setTarget(x, z)`
+
+Set target without flying.
+
+```js
+flight.setTarget(100, 200);
+```
+
+### `flight.setStatus(x, z)`
+
+Get flight status.
+
+```js
+const status = flight.setStatus(500, 500);
+// { phase, mode, pos, target, dist, elytra, rockets, flying }
+```
+
+### `flight.preflight()`
+
+Pre-flight check without flying.
+
+```js
+const check = await flight.preflight();
+// { ok, elytra: { have, need }, rockets: { have, need } }
 ```
 
 ---
@@ -128,84 +109,64 @@ flight._ctx.startLanding = () => {
 ## Events
 
 ```js
-flight.on('phase', (phase, msg) => {});  // phase changed
-flight.on('stopped', (reason) => {});     // emergency stop
-flight.on('error', (err) => {});          // flight failed
+flight.on('phase', (phase, msg) => {
+  console.log(phase);  // TAKEOFF, CLIMB, CRUISE, LAND, IDLE
+});
+
+flight.on('stopped', (reason) => {
+  console.log(reason);  // user, respawn, out of rkt
+});
+
+flight.on('error', (err) => {
+  console.error(err.message);
+});
 ```
 
 ---
 
-## API
-
-### `new ElytraFlight(bot, options?)`
-Create flight instance. `bot` is a mineflayer bot.
-
-### `flight.fly(x, z, options?)`
-Start flying to coordinates. Returns `this` for chaining.
-
-### `flight.stop(reason?)`
-Emergency stop. Lands immediately.
-
-### `flight.setTarget(x, z)`
-Set target without flying.
-
-### `flight.setMode(mode)`
-Set flight mode: `'FAST'`, `'MED'`, `'LOW'`.
-
-### `flight.setStatus(x, z)`
-Get current status object.
-
-### `flight.preflight()`
-Run pre-flight checks without flying. Returns `{ ok, elytra, rockets }`.
-
-### `flight.phase`
-Current phase string.
-
-### `flight.isFlying`
-Boolean — is the bot currently in elytra flight?
-
----
-
-## Import Modules Individually
-
-Use only what you need:
+## Options
 
 ```js
-const { countRockets, getElytraSummary, isSafeSolidBlock, Logger } = require('eafe');
+const flight = new ElytraFlight(bot, {
+  mode: 'MED',           // FAST, MED, LOW
+  cruiseAlt: 180,        // Cruise altitude (blocks)
+  maxRetries: 3,         // Retry attempts
+  safety: true,          // Pre-flight checks
+  debug: false,          // Verbose logging
+  ownerUsername: '',     // Whisper alerts to
+  landingMargin: 2,      // Blocks from edge
+});
 ```
 
-Available exports:
-- `ElytraFlight` — main class
-- `MODES`, `PHASE` — constants
-- `Logger` — debug logger
-- `countRockets`, `findRocket`, `autoEquipRocket` — inventory
-- `getElytraSummary`, `auditAndEquipElytra`, `calculateRequiredElytraDurability` — elytra
-- `isAir`, `isHazardousBlock`, `isSafeSolidBlock`, `angleDiff`, `sleep` — utils
-
 ---
 
-## Sub-Path Imports
+## Helpers
 
 ```js
-const Logger = require('eafe/logger');
-const { MODES } = require('eafe/constants');
-const { countRockets } = require('eafe/inventory');
+const { countRockets, getElytraSummary } = require('eafe');
+
+const rockets = countRockets(bot);
+const elytra = getElytraSummary(bot);
 ```
 
 ---
 
 ## Examples
 
-```
-examples/
-├── basic.js         — 10 lines, fly somewhere
-├── advanced.js      — options, events, status loop
-├── custom.js        — override modules, custom modes
-└── preflight.js     — check resources without flying
-```
+| Example | Description |
+|---------|-------------|
+| [`basic.js`](examples/basic.js) | Simple flight |
+| [`demo.js`](examples/demo.js) | Chat commands |
+| [`delivery.js`](examples/delivery.js) | Multi-stop delivery |
+| [`waypoint-travel.js`](examples/waypoint-travel.js) | Location loop |
+| [`rescue-bot.js`](examples/rescue-bot.js) | Player rescue |
+| [`multi-bot.js`](examples/multi-bot.js) | Fleet control |
+| [`inventory-transfer.js`](examples/inventory-transfer.js) | Chest transfer |
+| [`api-demo.js`](examples/api-demo.js) | API showcase |
 
 ---
 
 ## License
 
 MIT
+
