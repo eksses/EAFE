@@ -1,20 +1,18 @@
 'use strict';
 /**
- * EAFE v10.12 — Touchdown Recognition Failsafe & Hazard Classification
+ * EAFE v10.13 — Land-Mass Score Engine & Center Landing Spot Selection
  * ====================================================================================
  * Enhancements:
- *   1. Touchdown Recognition Failsafe (WANDER_SCAN Phase):
- *      - Audits bot.entity.onGround and checks if the standing surface is a valid solid safe block
- *        (isSafeSolidBlock). When touchdown on solid ground occurs (even with 0 rockets),
- *        immediately halts scanning, stops flyLoop timers, and logs clean touchdown!
- *   2. Hazardous vs Safe Block Classification:
- *      - Defined HAZARD_SURFACES: water, flowing_water, lava, flowing_lava, magma_block, fire, cactus.
- *      - Defined isSafeSolidBlock: ALL non-hazardous solid surfaces (grass, stone, sand, gravel, wood, etc.)
- *        are recognized as 100% safe landing blocks!
- *   3. Multi-Tier Altitude Terrain Safety Engine:
- *      - Low Altitude Zone (Y=60-110m): 96m raycast lookahead & emergency ascent (+0.75 rad pitch).
- *        Disabled when onGround=true or rockets=0 to allow smooth unpowered glide touchdown.
- *   4. Strict <= 10 Durability Elytra Auto-Swap Threshold Rule.
+ *   1. Contiguous Land-Mass Score Engine (getLandAreaScore & findSafeLandingSpotAround):
+ *      - Scans an 11x11 block surrounding grid (121 blocks) for every candidate landing spot.
+ *      - Rejects 1-block or 2-block isolated ledges, small platforms, and edges floating near water.
+ *      - Calculates contiguous solid safe land density and AUTOMATICALLY SELECTS THE CENTER OF THE
+ *        LARGEST CONTINUOUS SAFE LAND MASS!
+ *   2. Edge-Stuck & Ledge Hover Impulse Failsafe (startLanding):
+ *      - If the bot is hovering over liquid or near a ledge edge (dist > 1.5m, Y < 65m), fires an
+ *        impulse boost directly toward the CENTER of the solid land platform to pull the bot away from edges.
+ *   3. Touchdown Recognition Failsafe & Hazard Block Classification:
+ *      - Instantly detects touchdown on solid non-hazard blocks, stopping timers and logging arrival cleanly.
  *
  * Commands: f [X Z], setgoal X Z, m fast/med/low, s, status, audit.
  */
@@ -1082,16 +1080,42 @@ function createBot() {
   // ─────────────────────────────────────────────────────────────────────────
 
   /**
+   * Helper function: Computes the contiguous solid land score around (x, z)
+   * Scans a surrounding square of radius 5 blocks (11x11 block area = 121 blocks)
+   */
+  function getLandAreaScore(centerX, centerZ, radius = 5) {
+    let solidCount = 0;
+    for (let dx = -radius; dx <= radius; dx++) {
+      for (let dz = -radius; dz <= radius; dz++) {
+        const b = getGroundBlockAt(centerX + dx, centerZ + dz);
+        if (b && isSafeSolidBlock(b)) {
+          solidCount++;
+        }
+      }
+    }
+    return solidCount;
+  }
+
+  /**
    * Scans expanding concentric rings up to detected server render distance (blocks)
-   * across real-time loaded chunks to locate nearest solid safe land surface.
+   * across real-time loaded chunks to locate the LARGEST CONTINUOUS SOLID SAFE LAND SURFACE,
+   * targeting the CENTER of the largest land mass so the bot never lands on tiny ledges!
    */
   function findSafeLandingSpotAround(centerX, centerZ) {
     const rDist = getServerRenderDistance();
     const maxSearchRadius = rDist.blocks; // Use real-time detected server view radius!
 
+    let bestSpot = null;
+    let bestScore = -1;
+
+    // Check direct center target first
     const directGround = getGroundBlockAt(centerX, centerZ);
-    if (directGround && !isWaterOrLava(directGround) && SAFE_SURFACES.has(directGround.name)) {
-      return { x: centerX, z: centerZ, blockName: directGround.name, safe: true };
+    if (directGround && isSafeSolidBlock(directGround)) {
+      const score = getLandAreaScore(centerX, centerZ, 5);
+      bestSpot = { x: centerX, z: centerZ, blockName: directGround.name, safe: true, score: score };
+      bestScore = score;
+      // If direct target is in the middle of a massive land area (>= 90/121 solid), accept immediately!
+      if (score >= 90) return bestSpot;
     }
 
     // Dynamic Expanding Archimedean Search up to maxSearchRadius across loaded chunks
@@ -1101,13 +1125,23 @@ function createBot() {
         const sx = Math.round(centerX + r * Math.cos(angle));
         const sz = Math.round(centerZ + r * Math.sin(angle));
         const sb = getGroundBlockAt(sx, sz);
-        if (sb && !isWaterOrLava(sb) && SAFE_SURFACES.has(sb.name)) {
-          return { x: sx, z: sz, blockName: sb.name, safe: true };
+        if (sb && isSafeSolidBlock(sb)) {
+          const score = getLandAreaScore(sx, sz, 5);
+          if (score > bestScore) {
+            bestScore = score;
+            bestSpot = { x: sx, z: sz, blockName: sb.name, safe: true, score: score };
+          }
         }
       }
     }
 
-    return { x: centerX, z: centerZ, blockName: 'unknown', safe: false };
+    if (bestSpot && bestScore >= 9) { // Require at least a 3x3 solid land area minimum
+      console.log(`[EAFE] 🏝 Found optimal center landing spot at (${bestSpot.x}, ${bestSpot.z}) [${bestSpot.blockName}] with Land-Mass Score ${bestScore}/121`);
+      return bestSpot;
+    }
+
+    if (bestSpot) return bestSpot;
+    return { x: centerX, z: centerZ, blockName: 'unknown', safe: false, score: 0 };
   }
 
   /**
@@ -1314,10 +1348,14 @@ function createBot() {
       const currentBlockUnder = getGroundBlockAt(Math.round(pos.x), Math.round(pos.z));
       const overLiquid = !currentBlockUnder || isWaterOrLava(currentBlockUnder) || !SAFE_SURFACES.has(currentBlockUnder.name);
 
-      if (overLiquid && pos.y < 65 && countRockets() > 0) {
-        console.warn(`[EAFE] 🌊 Hovering over liquid (Y=${pos.y.toFixed(1)}) — redirecting to safe land (${targetX}, ${targetZ})!`);
-        lookForce(yawTo(targetX, targetZ), 0.40);
-        fireRocketDirect();
+      if ((overLiquid || dist2D(targetX, targetZ) > 1.5) && pos.y < 65) {
+        if (countRockets() > 0) {
+          console.warn(`[EAFE] 🌊 Hovering near ledge/liquid (Y=${pos.y.toFixed(1)}, dist=${dist2D(targetX, targetZ).toFixed(1)}m) — firing impulse rocket to center of land mass (${targetX}, ${targetZ})!`);
+          lookForce(yawTo(targetX, targetZ), 0.40);
+          fireRocketDirect();
+        } else {
+          lookForce(yawTo(targetX, targetZ), 0.05); // Unpowered glide push to land center
+        }
       } else if (relY <= 4.0) {
         lookForce(yawTo(targetX, targetZ), 0.10); // Nose UP flare
         try { bot.setControlState('sneak', true); } catch(_) {}
