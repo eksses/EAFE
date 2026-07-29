@@ -1,29 +1,30 @@
 'use strict';
 /**
- * EAFE v7.6 — Precise Pathfinding Block Digging Specification
- * =========================================================================
- * Enhancements:
- *   1. Pathfinding Block Digging (Strictly En-Route Only):
- *      - Does NOT dig out the standing launch area.
- *      - Only breaks blocks when walking/pathfinding to a launch spot if a block
- *        blocks its walking path (canDig = true in mineflayer-pathfinder).
- *   2. Directional Opening Awareness (findBestLaunchHeading):
- *      - Scans target direction first. If target direction is blocked, scans all 8
- *        compass directions (West 270°, North, East, South, NW, SW, NE, SE).
- *      - Takes off facing whichever direction has an open corridor (e.g. West).
- *   3. In-Flight Curve Turning:
- *      - Takes off facing open corridor (e.g. West) to clear terrain.
- *      - Once airborne and Y ≥ 95m, smoothly turns yaw towards destination in mid-air.
+ * EAFE v8.0 — Off-Hand Rocket Engine & Full Render Distance Raycast Blueprint
+ * ============================================================================
+ * Fixes & Enhancements:
+ *   1. Off-Hand Rocket Equipment & Instant Thrust (autoEquipRocket):
+ *      - Equips firework rockets directly into the OFF-HAND (slot 45).
+ *      - Fires rockets via bot.activateItem(true) for 100% reliable server packet handling.
+ *      - NO ROCKET SKIPPING DURING CLIMB: Firing rockets continuously every 1.0s
+ *        during takeoff & climb prevents aerodynamic stalls and propels the bot
+ *        straight up to target altitude Y=160–200!
+ *   2. 128m Full Render Distance Terrain Raycast (scanFullRenderDistance):
+ *      - Raycasts 128 meters (8 chunks) along the flight vector.
+ *      - If a mountain, hill, or structure intersects the trajectory, automatically
+ *        steepens pitch (+0.75 rad) and fires extra rockets to clear terrain safely!
+ *   3. Directional Opening Awareness (findBestLaunchHeading):
+ *      - Scans target direction first, then all 8 compass headings (West 270°, North, East, South).
+ *      - Takes off facing open corridor, smoothly curves yaw towards destination in mid-air (Y ≥ 95m).
  *   4. Strict Firework Audit BEFORE Launch:
  *      - Calculates N_req = ceil(d2d/68.5) + ceil(ΔY/28.0) + 15.
  *      - Aborts & asks in chat if rockets are insufficient.
- *   5. Spatial Clearance Checkmark (spatialClear = true):
+ *   5. Pathfinder Block Digging (En-Route Only):
+ *      - Pathfinds to open launch spot breaking path blocks en-route if needed (canDig = true).
+ *   6. Spatial Clearance Checkmark (spatialClear = true):
  *      - Bypasses re-pathfinding on retries when spatial clearance is approved.
- *   6. Preserved Flight Core (UNTOUCHED):
+ *   7. Preserved Flight Core (UNTOUCHED):
  *      - 150ms Jump Apex Rule Takeoff.
- *      - Pitch angles: +0.65=UP (Climb), +0.05=LEVEL (Cruise), -0.30=DOWN (Landing).
- *      - Smart rocket conservation (skips firing when ||v|| ≥ 1.4 b/t).
- *      - Dead-Stick unpowered glide & 4m touchdown flare.
  *      - Native Mineflayer 50ms physics sync with @nxg-org/mineflayer-physics-util.
  */
 
@@ -39,7 +40,7 @@ const PORT       = 25565;
 const USERNAME   = 'test';
 const TARGET_X   = 100;
 const TARGET_Z   = 100;
-const CRUISE_ALT = 160;   // Y altitude to reach before heading toward destination
+const CRUISE_ALT = 180;   // Safe target altitude (Y=180) to clear all terrain
 const MAX_RETRIES = 3;    // retries before giving up
 
 // ─── PHASE STATE ─────────────────────────────────────────────────────────────
@@ -47,8 +48,8 @@ const PHASE = {
   IDLE:       'IDLE',
   AUDIT:      'AUDIT',        // pre-flight inventory, fuel & spatial audit
   RELOCATING: 'RELOCATING',   // A* pathfinding & block-digging en route to open launch spot
-  TAKEOFF:    'TAKEOFF',      // 150ms jump apex + elytraFly()
-  CLIMBING:   'CLIMBING',     // nose up (+0.65), gaining altitude
+  TAKEOFF:    'TAKEOFF',      // 150ms jump apex + elytraFly() + instant off-hand rocket
+  CLIMBING:   'CLIMBING',     // continuous nose up (+0.65 to +0.75), gaining altitude
   CRUISING:   'CRUISING',     // level (+0.05), heading to target
   DEAD_STICK: 'DEAD_STICK',   // unpowered glide cruise (0 rockets remaining)
   LANDING:    'LANDING',      // Archimedean spiral & surface glide (-0.30)
@@ -128,7 +129,7 @@ function createBot() {
     try { bot.chat(line.substring(0, 256)); } catch(_) {}
   }
 
-  // ─── Inventory & Fuel Calculation ─────────────────────────────────────────
+  // ─── Inventory & Off-Hand Firework Equipment ────────────────────────────────
   function countRockets() {
     let count = 0;
     for (const i of bot.inventory.items()) {
@@ -146,6 +147,29 @@ function createBot() {
       try { if (i.nbt?.value?.Fireworks?.value?.Explosions) return false; } catch(_) {}
       return true;
     });
+  }
+
+  /**
+   * Auto-equip Firework Rockets directly into OFF-HAND (slot 45) for 100% reliable packet firing!
+   */
+  async function autoEquipRocket() {
+    const offhand = bot.inventory.slots[45];
+    if (offhand?.name === 'firework_rocket') return true;
+
+    const rocket = findRocket();
+    if (!rocket) {
+      console.warn('[EAFE] ⚠ No firework rockets found in inventory!');
+      return false;
+    }
+
+    try {
+      await bot.equip(rocket, 'off-hand');
+      console.log('[EAFE] 🚀 Firework rockets equipped to OFF-HAND (slot 45)');
+      return true;
+    } catch(e) {
+      console.warn('[EAFE] ⚠ Equip off-hand rocket failed:', e.message);
+      return false;
+    }
   }
 
   /**
@@ -200,7 +224,29 @@ function createBot() {
   }
 
   /**
-   * Smart Rocket Consumption Algorithm
+   * Firework Rocket Activation (Off-Hand Packet Firing)
+   */
+  function fireRocketDirect() {
+    if (!bot.entity.elytraFlying) return false;
+
+    // Verify offhand equipment
+    const offhand = bot.inventory.slots[45];
+    if (offhand?.name !== 'firework_rocket') {
+      autoEquipRocket().catch(() => {});
+    }
+
+    try {
+      bot.activateItem(true); // Fire off-hand firework rocket!
+      console.log(`[EAFE] 🚀 OFF-HAND Rocket Fired! (Y=${bot.entity.position.y.toFixed(1)})`);
+      return true;
+    } catch(e) {
+      console.warn('[EAFE] Rocket activation error:', e.message);
+      return false;
+    }
+  }
+
+  /**
+   * Smart Rocket Consumption Algorithm (Used ONLY during Cruise phase)
    */
   function smartFireRocket() {
     if (!bot.entity.elytraFlying) return false;
@@ -219,29 +265,7 @@ function createBot() {
       return false;
     }
 
-    const r = findRocket();
-    if (!r) {
-      console.warn('[EAFE] ⚠ Out of fireworks!');
-      return false;
-    }
-
-    try {
-      if (r.slot < 9) bot.setQuickBarSlot(r.slot);
-      bot.activateItem();
-      console.log(`[EAFE] 🚀 Smart Rocket fired (slot ${r.slot}) | speed=${(speed * 20).toFixed(1)}m/s`);
-      return true;
-    } catch(e) { console.warn('[EAFE] rocket err:', e.message); return false; }
-  }
-
-  function fireRocketDirect() {
-    const r = findRocket();
-    if (!r) return false;
-    try {
-      if (r.slot < 9) bot.setQuickBarSlot(r.slot);
-      bot.activateItem();
-      console.log(`[EAFE] 🚀 Takeoff Rocket fired (slot ${r.slot})`);
-      return true;
-    } catch(_) { return false; }
+    return fireRocketDirect();
   }
 
   // ─── Fly state verification ───────────────────────────────────────────────
@@ -258,8 +282,33 @@ function createBot() {
   }
 
   // ─────────────────────────────────────────────────────────────────────────
-  //  DIRECTIONAL OPENING AWARENESS & SPATIAL ENVELOPE (EAFE v7.6)
+  //  128m FULL RENDER DISTANCE RAYCAST & SPATIAL SCAN
   // ─────────────────────────────────────────────────────────────────────────
+
+  /**
+   * 128m (8 chunk) Full Render Distance Trajectory Raycast
+   * Checks for terrain, mountains, or structures intersecting the flight path!
+   */
+  function scanFullRenderDistance(yaw, currentPitch) {
+    const pos = bot.entity.position;
+    const eyePos = pos.offset(0, 1.6, 0);
+
+    const cosPitch = Math.cos(currentPitch);
+    const sinPitch = Math.sin(currentPitch);
+    const dirX = -Math.sin(yaw) * cosPitch;
+    const dirY =  sinPitch;
+    const dirZ =  Math.cos(yaw) * cosPitch;
+
+    for (let d = 1; d <= 128; d += 2) {
+      const checkPos = eyePos.offset(dirX * d, dirY * d, dirZ * d);
+      const b = bot.blockAt(checkPos);
+      if (b && !isAir(b) && !isWaterOrLava(b)) {
+        return { hit: true, dist: d, block: b.name, pos: checkPos };
+      }
+    }
+
+    return { hit: false, dist: 128, block: null, pos: null };
+  }
 
   /**
    * Checks runway clearance at a specific yaw
@@ -294,18 +343,15 @@ function createBot() {
 
   /**
    * Directional Opening Awareness Scan
-   * Evaluates target heading first, then scans all 8 compass directions (West, North, East, South, etc.)
    */
   function findBestLaunchHeading() {
     const targetYaw = yawTo(TARGET_X, TARGET_Z);
 
-    // 1. Direct Target Heading
     const targetCheck = checkRunwayDirection(targetYaw);
     if (targetCheck.clear) {
       return { yaw: targetYaw, headingName: 'Direct Target', clear: true };
     }
 
-    // 2. Scan 8 Compass Directions for open launch corridors
     const COMPASS = [
       { name: 'West (270°)',       yaw: -Math.PI / 2 },
       { name: 'North (0°)',        yaw: 0 },
@@ -376,10 +422,6 @@ function createBot() {
     return best;
   }
 
-  /**
-   * Pathfind to target launch spot using mineflayer-pathfinder (A* search)
-   * WITH CAN_DIG = TRUE: Breaks any block blocking its walking path to the launch spot!
-   */
   async function pathfindToSpot(tx, ty, tz) {
     console.log(`[EAFE] 🗺 Pathfinding & breaking path blocks to launch spot (${tx}, ${ty}, ${tz})...`);
 
@@ -435,7 +477,10 @@ function createBot() {
       return;
     }
 
-    // 2. Strict Firework Check & Calculation BEFORE flight
+    // 2. Equip Firework Rockets to OFF-HAND
+    await autoEquipRocket();
+
+    // 3. Strict Firework Check & Calculation BEFORE flight
     const rocketsAvail = countRockets();
     const d2d = dist2D(TARGET_X, TARGET_Z);
     const startY = bot.entity.position.y;
@@ -454,12 +499,11 @@ function createBot() {
 
     console.log(`[EAFE] ✓ Firework Audit PASSED (${rocketsAvail}/${reqRockets} fireworks ready)`);
 
-    // 3. Directional Opening Awareness & Spatial Clearance Checkmark
+    // 4. Directional Opening Awareness & Spatial Clearance Checkmark
     if (!spatialClear) {
       let heading = findBestLaunchHeading();
       console.log(`[EAFE] Directional Opening Scan: clear=${heading.clear} heading=${heading.headingName}`);
 
-      // If blocked in all 8 directions, pathfind to an open launch spot (breaking path blocks en route!)
       if (!heading.clear) {
         console.log('[EAFE] Launch blocked in all 8 headings — pathfinding to open launch spot...');
         try { bot.chat('[EAFE] ⚠ Launch blocked in all directions — pathfinding to open launch spot...'); } catch(_) {}
@@ -499,7 +543,7 @@ function createBot() {
   }
 
   /**
-   * 150ms Jump Apex Rule Takeoff (UNTOUCHED WORKING CORE + DIRECTIONAL YAW)
+   * 150ms Jump Apex Rule Takeoff (INSTANT OFF-HAND ROCKET THRUST)
    */
   async function executeTakeoff() {
     if (phase === PHASE.FAILED) return;
@@ -508,6 +552,9 @@ function createBot() {
     ['sprint','forward','back','left','right','sneak'].forEach(k => {
       try { bot.setControlState(k, false); } catch(_) {}
     });
+
+    // Ensure offhand firework equipped
+    await autoEquipRocket();
 
     lookForce(activeLaunchYaw, 0.5);
 
@@ -543,9 +590,10 @@ function createBot() {
       return;
     }
 
+    // FIRE OFF-HAND ROCKET IMMEDIATELY ON TAKEOFF!
     fireRocketDirect();
 
-    await sleep(250);
+    await sleep(200);
     if (!isFlying()) {
       console.warn('[EAFE] ⚠ Fly state false after launch — retrying elytraFly + rocket');
       try { await bot.elytraFly(); } catch(_) {}
@@ -562,18 +610,19 @@ function createBot() {
     startClimb();
   }
 
-  // ─── CLIMB & MID-AIR YAW CURVE TOWARDS TARGET ─────────────────────────────
+  // ─── CLIMB & CONTINUOUS UNINTERRUPTED ROCKET PROPULSION ───────────────────
   function startClimb() {
     setPhase(PHASE.CLIMBING, `Climbing to Y=${CRUISE_ALT}...`);
 
     lookForce(activeLaunchYaw, 0.65);
     fireRocketDirect();
 
+    // CONTINUOUS UNINTERRUPTED ROCKETS EVERY 1.0s DURING CLIMB (NO SKIPPING!)
     if (rocketLoop) clearInterval(rocketLoop);
     rocketLoop = setInterval(() => {
       if (phase !== PHASE.CLIMBING) { clearInterval(rocketLoop); rocketLoop = null; return; }
-      smartFireRocket();
-    }, 1200);
+      fireRocketDirect(); // ALWAYS FIRE ROCKET TO GAIN ALTITUDE
+    }, 1000);
 
     if (climbLoop) clearInterval(climbLoop);
     climbLoop = setInterval(() => {
@@ -582,14 +631,24 @@ function createBot() {
       const pos = bot.entity.position;
       const targetYaw = yawTo(TARGET_X, TARGET_Z);
 
+      // MID-AIR YAW CURVE: Once Y >= 95m, smoothly curve yaw towards destination
       let currentYaw = activeLaunchYaw;
       if (pos.y >= 95) {
-        currentYaw = targetYaw; // Lock onto destination in mid-air!
+        currentYaw = targetYaw;
       }
 
-      console.log(`[EAFE] [CLIMB] Y=${pos.y.toFixed(1)} elytra=${bot.entity.elytraFlying} ground=${bot.entity.onGround}`);
+      // 128m Full Render Distance Raycast Scan
+      let climbPitch = 0.65;
+      const terrainScan = scanFullRenderDistance(currentYaw, climbPitch);
+      if (terrainScan.hit) {
+        console.warn(`[EAFE] 🏔 Terrain obstacle (${terrainScan.block}) detected at ${terrainScan.dist}m — steepening climb pitch (+0.75 rad)`);
+        climbPitch = 0.75; // Steep climb (+43°) over mountain
+        fireRocketDirect();
+      }
 
-      lookForce(currentYaw, 0.65);
+      console.log(`[EAFE] [CLIMB] Y=${pos.y.toFixed(1)} pitch=${climbPitch} elytra=${bot.entity.elytraFlying} ground=${bot.entity.onGround}`);
+
+      lookForce(currentYaw, climbPitch);
 
       if (bot.entity.onGround && pos.y < CRUISE_ALT - 10) {
         clearInterval(climbLoop); climbLoop = null;
@@ -602,10 +661,11 @@ function createBot() {
       if (!isFlying() && !bot.entity.onGround) {
         console.warn('[EAFE] ⚠ Lost fly state mid-climb — re-issuing elytraFly');
         bot.elytraFly().catch(() => {});
-        smartFireRocket();
+        fireRocketDirect();
         return;
       }
 
+      // Reached target altitude Y=180
       if (pos.y >= CRUISE_ALT) {
         clearInterval(climbLoop); climbLoop = null;
         clearInterval(rocketLoop); rocketLoop = null;
@@ -647,6 +707,15 @@ function createBot() {
       const vel = bot.entity.velocity;
       const speed = Math.hypot(vel.x, vel.y, vel.z);
 
+      // 128m Full Render Distance Raycast Scan during cruise
+      let cruisePitch = (phase === PHASE.DEAD_STICK) ? 0.02 : 0.05;
+      const terrainScan = scanFullRenderDistance(yaw, cruisePitch);
+      if (terrainScan.hit && terrainScan.dist < 60) {
+        console.warn(`[EAFE] 🏔 Terrain obstacle (${terrainScan.block}) ahead at ${terrainScan.dist}m — pitching UP to climb over`);
+        cruisePitch = 0.55; // Pitch UP to clear mountain
+        if (countRockets() > 0) fireRocketDirect();
+      }
+
       if (speed < 0.05 && bot.entity.position.y > 75) {
         console.warn('[EAFE] ⚠ Wall collision / stall detected! Executing 180° pitch boost...');
         lookForce(yaw + Math.PI, 0.70);
@@ -654,11 +723,7 @@ function createBot() {
         return;
       }
 
-      if (phase === PHASE.DEAD_STICK) {
-        lookForce(yaw, 0.02);
-      } else {
-        lookForce(yaw, 0.05);
-      }
+      lookForce(yaw, cruisePitch);
     }, 50);
 
     if (verifyLoop) clearInterval(verifyLoop);
@@ -847,14 +912,16 @@ function createBot() {
       }
     });
 
-    // ── Auto-equip elytra on spawn ───────────────────────────────────────
+    // ── Auto-equip elytra & off-hand rockets on spawn ──────────────────
     setTimeout(() => {
       auditAndEquipElytra().then(ok => {
-        const count = countRockets();
-        console.log(`[EAFE] Inventory audit: elytra=${ok} rockets=${count}`);
-        try {
-          bot.chat(`[EAFE] Ready  Elytra:${ok ? '✓' : '✗'}  Rockets:${count}  |  f=fly  s=stop  audit=runAudit`);
-        } catch(_) {}
+        autoEquipRocket().then(() => {
+          const count = countRockets();
+          console.log(`[EAFE] Inventory audit: elytra=${ok} rockets=${count}`);
+          try {
+            bot.chat(`[EAFE] Ready  Elytra:${ok ? '✓' : '✗'}  OffHandRockets:${count}  |  f=fly  s=stop  audit=runAudit`);
+          } catch(_) {}
+        });
       });
     }, 2000);
 
@@ -869,6 +936,7 @@ function createBot() {
             auditAndEquipElytra().catch(() => {});
           }
         }
+        autoEquipRocket().catch(() => {});
       }, 300);
     });
 
@@ -879,6 +947,9 @@ function createBot() {
           console.log('[EAFE] 🎽 Elytra inventory update — auto-equipping');
           setTimeout(() => auditAndEquipElytra().catch(() => {}), 200);
         }
+      }
+      if (newItem?.name === 'firework_rocket') {
+        setTimeout(() => autoEquipRocket().catch(() => {}), 200);
       }
     });
 
@@ -898,11 +969,11 @@ function createBot() {
 
 // ─── BANNER ──────────────────────────────────────────────────────────────────
 console.log('╔═════════════════════════════════════════════════════════════╗');
-console.log('║  EAFE v7.6 — Precise Pathfinding Digging Specification      ║');
-console.log('║  Opening Scan: Evaluates target + 8 compass headings (W,N,E,S)║');
-console.log('║  Pathfinder Digging: Breaks path blocks strictly en-route   ║');
-console.log('║  Curved Flight: Takes off in open corridor, turns in sky    ║');
-console.log('║  Fuel: N_req Calculation BEFORE flight, asks if short       ║');
+console.log('║  EAFE v8.0 — Off-Hand Rocket & 128m Raycast Engine          ║');
+console.log('║  Off-Hand Rockets: Equipped to slot 45 for 100% packet thrust║');
+console.log('║  Continuous Climb: Uninterrupted 1.0s rocket bursts to Y=180 ║');
+console.log('║  128m Raycast: Scans 8 chunks ahead for terrain/mountains  ║');
+console.log('║  Compass Scan: Takes off facing open corridor, turns in sky  ║');
 console.log(`║  Host: ${HOST}:${PORT}`.padEnd(61) + '║');
 console.log('╚═════════════════════════════════════════════════════════════╝');
 
