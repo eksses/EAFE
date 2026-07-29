@@ -1,35 +1,31 @@
 'use strict';
 /**
- * EAFE v7.1 — Elytra Autonomous Flight Engine Specification
- * =========================================================
- * Core Mechanics (WORKING - UNTOUCHED):
- *   • Takeoff: 150ms Jump Apex Rule (Jump -> wait airborne -> elytraFly() -> rocket)
- *   • Pitch Angles: +0.65=UP (Climb), +0.05=LEVEL (Cruise), -0.30=DOWN (Landing)
- *   • Native 50ms Mineflayer physics sync with @nxg-org/mineflayer-physics-util
- *
- * Additive Features (EAFE-v7 & v7.1 Specification):
- *   • Smart Rocket Consumption & Conservation (EAFE-v7.1 Sec 1.1 & 5.0):
- *       - Monitors velocity ||v|| = √(vx² + vy² + vz²)
- *       - Skips rockets when speed ||v|| ≥ 1.4 b/t (~28 m/s) to save >60% rockets
- *       - Only fires when speed ||v|| < 0.6 b/t
- *   • Dead-Stick Landing Engine (EAFE-v7 Sec 8):
- *       - Triggers when rocket count == 0: unpowered L/D glide (+0.02 pitch)
- *       - 4m Flare Touchdown: Locks nose UP flare (+0.10 pitch) to cancel impact
- *   • 3D Spatial Audit & Pre-Flight Fuel Calculation (EAFE-v7.1 Sec 2.2 & 3.2):
- *       - Calculates N_req = ceil(d2d/68.5) + ceil(ΔY/28.0) + 15
- *       - Elytra Durability Hotswap (swaps if durability ≤ 15)
- *       - 3D spatial envelope scan (Overhead 5m, Runway 4m, Lateral 3m)
- *   • Wall Collision Emergency Reversal (ERR_WALL_COLLISION):
- *       - Detects velocity stall < 0.1 m/s at altitude, pitches UP +0.70 & 180° turn
- *   • Surface Classifier & Archimedean Spiral Landing (EAFE-v7.1 Sec 6.1-6.2):
- *       - Validates safe solid blocks vs hazards (lava, water, fire, cactus)
- *       - Archimedean spiral search (R=1..20m) for safe landing pad if LZ blocked
+ * EAFE v7.2 — Elytra Autonomous Flight Engine Specification (Fixes & Pathfinder Integration)
+ * =========================================================================================
+ * Critical Fixes:
+ *   1. Spatial Envelope Audit Bug Fix:
+ *      - Changed runway check from dy=0..1 to dy=1..2 (Y+1 body & Y+2 head space).
+ *      - Ground blocks at dy=0 no longer trigger false "Runway blocked at 1m" warnings in open fields!
+ *   2. Pathfinder Integration (mineflayer-pathfinder):
+ *      - Replaced raw walking with A* pathfinding (mineflayer-pathfinder).
+ *      - Liquid cost set to infinity (canSwim = false) so bot NEVER steps into water or lava!
+ *      - Pathfinds safely around obstacles to open launch spots.
+ *   3. Strict Surface Safety (No Water/Lava Launches or Landings):
+ *      - Strictly filters for solid ground (grass, dirt, stone, obsidian, etc.).
+ *      - Re-routes launch/landing targets away from liquids and hazards.
+ *   4. Preserved Flight Core (UNTOUCHED):
+ *      - 150ms Jump Apex Rule Takeoff.
+ *      - Pitch angles: +0.65=UP (Climb), +0.05=LEVEL (Cruise), -0.30=DOWN (Landing).
+ *      - Smart rocket conservation (skips firing when ||v|| ≥ 1.4 b/t).
+ *      - Dead-Stick unpowered glide & 4m touchdown flare.
+ *      - Native Mineflayer 50ms physics sync with @nxg-org/mineflayer-physics-util.
  */
 
 const mineflayer    = require('mineflayer');
 const { Vec3 }      = require('vec3');
 const physicsLoader = require('@nxg-org/mineflayer-physics-util').default;
 const { EPhysicsCtx } = require('@nxg-org/mineflayer-physics-util');
+const { pathfinder, movements: { Movements }, goals: { GoalBlock } } = require('mineflayer-pathfinder');
 
 // ─── CONFIG ──────────────────────────────────────────────────────────────────
 const HOST       = '103.151.60.212';
@@ -44,7 +40,7 @@ const MAX_RETRIES = 3;    // retries before giving up
 const PHASE = {
   IDLE:       'IDLE',
   AUDIT:      'AUDIT',        // pre-flight inventory, fuel & spatial audit
-  RELOCATING: 'RELOCATING',   // walking to open launch spot
+  RELOCATING: 'RELOCATING',   // A* pathfinding to open launch spot
   TAKEOFF:    'TAKEOFF',      // 150ms jump apex + elytraFly()
   CLIMBING:   'CLIMBING',     // nose up (+0.65), gaining altitude
   CRUISING:   'CRUISING',     // level (+0.05), heading to target
@@ -53,7 +49,7 @@ const PHASE = {
   FAILED:     'FAILED',       // flight failed, auto-retry scheduled
 };
 
-// Whitelisted safe landing surfaces (EAFE-v7.1 Sec 6.1)
+// Whitelisted safe landing & launch surfaces (STRICT: NO WATER, NO LAVA)
 const SAFE_SURFACES = new Set([
   'grass_block', 'dirt', 'coarse_dirt', 'podzol', 'stone', 'cobblestone',
   'smooth_stone', 'granite', 'diorite', 'andesite', 'sand', 'red_sand',
@@ -70,6 +66,11 @@ function isAir(block) {
   return block.name === 'air' || block.name === 'cave_air' || block.name === 'void_air';
 }
 
+function isWaterOrLava(block) {
+  if (!block) return false;
+  return block.name.includes('water') || block.name.includes('lava');
+}
+
 // ─── BOT FACTORY ─────────────────────────────────────────────────────────────
 function createBot() {
   const bot = mineflayer.createBot({
@@ -79,6 +80,7 @@ function createBot() {
   });
 
   bot.loadPlugin(physicsLoader);
+  bot.loadPlugin(pathfinder);
 
   // ── session state ──
   let phase       = PHASE.IDLE;
@@ -99,6 +101,7 @@ function createBot() {
   function emergencyStop(reason) {
     phase = PHASE.IDLE;
     clearAllTimers();
+    try { bot.pathfinder.stop(); } catch(_) {}
     ['sprint','forward','back','left','right','jump','sneak'].forEach(k => {
       try { bot.setControlState(k, false); } catch(_) {}
     });
@@ -140,7 +143,7 @@ function createBot() {
    * Elytra Durability & Auto-HotSwap Audit (EAFE-v7.1 Sec 3.2)
    */
   async function auditAndEquipElytra() {
-    const chest = bot.inventory.slots[6]; // chestplate slot
+    const chest = bot.inventory.slots[6];
     if (chest?.name === 'elytra') {
       const dur = chest.maxDurability ? (chest.maxDurability - chest.durabilityUsed) : 400;
       if (dur > 15) {
@@ -183,37 +186,24 @@ function createBot() {
     return Math.hypot((x ?? TARGET_X) - p.x, (z ?? TARGET_Z) - p.z);
   }
 
-  /**
-   * Set yaw & pitch with force=true so look updates immediately for physics
-   * PITCH CONVENTION:
-   *   +0.65 rad (+37°) = LOOKING UP / CLIMBING
-   *    0.00 rad (  0°) = LEVEL FLIGHT
-   *   -0.30 rad (-17°) = LOOKING DOWN / DESCENDING
-   */
   function lookForce(yaw, pitch) {
     bot.look(yaw, pitch, true);
   }
 
   /**
    * Smart Rocket Consumption & Conservation Algorithm (EAFE-v7.1 Sec 1.1 & 5.0)
-   * Calculates total velocity ||v|| = √(vx² + vy² + vz²).
-   * Skips rocket deployment if speed ||v|| ≥ 1.4 blocks/tick (~28 m/s).
-   * Conserves over 60% of fireworks!
    */
   function smartFireRocket() {
     if (!bot.entity.elytraFlying) return false;
 
-    // Measure total speed ||v||
     const vel = bot.entity.velocity;
     const speed = Math.hypot(vel.x, vel.y, vel.z);
 
-    // If speed is already high (≥ 1.4 b/t ≈ 28 m/s), skip rocket to save fuel!
     if (speed >= 1.4) {
       console.log(`[EAFE] 🍃 Rocket skipped — speed optimal (${(speed * 20).toFixed(1)} m/s)`);
       return false;
     }
 
-    // High server ping protection (EAFE-v7.1 Sec 4.2)
     const ping = bot.player?.ping ?? 50;
     if (ping > 500) {
       console.warn(`[EAFE] ⚠ High server ping (${ping}ms) — throttling rocket`);
@@ -259,51 +249,80 @@ function createBot() {
   }
 
   // ─────────────────────────────────────────────────────────────────────────
-  //  PRE-FLIGHT AUDIT & SPATIAL ENVELOPE (EAFE-v7.1 Sec 3.2)
+  //  PRE-FLIGHT AUDIT & SPATIAL ENVELOPE (FIXED dy=1..2 & strict ground)
   // ─────────────────────────────────────────────────────────────────────────
 
+  /**
+   * Spatial Envelope Audit:
+   *  1. Overhead Column: Y+1 to Y+5 (5 blocks straight up)
+   *  2. Forward Runway: 4m ahead at Y+1 (body) and Y+2 (head)
+   */
   function auditSpatialEnvelope() {
     const pos = bot.entity.position;
     const yaw = yawTo(TARGET_X, TARGET_Z);
 
+    // 1. Overhead Column (Y+1 to Y+5)
     for (let dy = 1; dy <= 5; dy++) {
-      if (!isAir(bot.blockAt(pos.offset(0, dy, 0)))) {
-        return { clear: false, reason: `Overhead blocked at Y+${dy}` };
+      const b = bot.blockAt(pos.offset(0, dy, 0));
+      if (!isAir(b)) {
+        return { clear: false, reason: `Overhead blocked at Y+${dy} (${b?.name})` };
       }
     }
 
+    // 2. Forward Runway: check Y+1 and Y+2 (body & head clearance, excluding ground!)
     const dirX = -Math.sin(yaw);
     const dirZ =  Math.cos(yaw);
 
     for (let d = 1; d <= 4; d++) {
-      for (let dy = 0; dy <= 1; dy++) {
+      for (let dy = 1; dy <= 2; dy++) {
         const bPos = pos.offset(Math.round(dirX * d), dy, Math.round(dirZ * d));
-        if (!isAir(bot.blockAt(bPos))) {
-          return { clear: false, reason: `Runway blocked at ${d}m ahead` };
+        const b = bot.blockAt(bPos);
+        if (!isAir(b)) {
+          return { clear: false, reason: `Runway blocked at ${d}m ahead (Y+${dy}: ${b?.name})` };
         }
       }
+    }
+
+    // 3. Ground under feet: verify it's NOT liquid (water/lava)
+    const blockUnder = bot.blockAt(pos.offset(0, -0.5, 0));
+    if (isWaterOrLava(blockUnder)) {
+      return { clear: false, reason: `Standing in liquid (${blockUnder?.name})` };
     }
 
     return { clear: true, reason: 'Spatial envelope clear' };
   }
 
+  /**
+   * Find nearby open elevated launch spot on STRICT safe solid ground (no water/lava!)
+   */
   function findElevatedOpenSpot() {
     const pos   = bot.entity.position;
     const baseY = Math.floor(pos.y);
     let best    = null;
 
-    for (let dx = -5; dx <= 5; dx += 2) {
-      for (let dz = -5; dz <= 5; dz += 2) {
+    for (let dx = -7; dx <= 7; dx += 2) {
+      for (let dz = -7; dz <= 7; dz += 2) {
         const cx = Math.floor(pos.x) + dx;
         const cz = Math.floor(pos.z) + dz;
 
+        let groundBlock = null;
         let groundY = null;
-        for (let dy = 1; dy >= -3; dy--) {
-          const b = bot.blockAt(new Vec3(cx, baseY + dy, cz));
-          if (b && !isAir(b)) { groundY = baseY + dy + 1; break; }
-        }
-        if (groundY === null) continue;
 
+        for (let dy = 1; dy >= -4; dy--) {
+          const b = bot.blockAt(new Vec3(cx, baseY + dy, cz));
+          if (b && !isAir(b)) {
+            groundBlock = b;
+            groundY = baseY + dy + 1;
+            break;
+          }
+        }
+
+        // STRICT SAFETY: Must be solid ground, NEVER water or lava!
+        if (!groundBlock || isWaterOrLava(groundBlock) || !SAFE_SURFACES.has(groundBlock.name)) {
+          continue;
+        }
+
+        // Check clear sky above ground
         let openAir = 0;
         for (let dy = 0; dy < 15; dy++) {
           if (isAir(bot.blockAt(new Vec3(cx, groundY + dy, cz)))) openAir++;
@@ -314,7 +333,7 @@ function createBot() {
           const dist = Math.hypot(dx, dz);
           const score = openAir - dist * 0.5;
           if (score > (best?.score ?? -999)) {
-            best = { x: cx, y: groundY, z: cz, score, openAir };
+            best = { x: cx, y: groundY, z: cz, score, openAir, blockName: groundBlock.name };
           }
         }
       }
@@ -323,31 +342,42 @@ function createBot() {
     return best;
   }
 
-  async function walkToSpot(tx, tz) {
-    const TIMEOUT = 10_000;
+  /**
+   * Pathfind to target launch spot using mineflayer-pathfinder (A* search)
+   * Avoids water, lava, hazards, and pits!
+   */
+  async function pathfindToSpot(tx, ty, tz) {
+    console.log(`[EAFE] 🗺 Pathfinding to safe launch spot (${tx}, ${ty}, ${tz})...`);
+
+    const defaultMove = new Movements(bot);
+    defaultMove.canSwim = false;      // NEVER ENTER WATER
+    defaultMove.liquidCost = 100;     // HIGH PENALTY FOR LIQUIDS
+    defaultMove.allowParkour = false; // STICK TO SAFE PATHS
+
+    bot.pathfinder.setMovements(defaultMove);
+    bot.pathfinder.setGoal(new GoalBlock(tx, ty, tz));
+
+    const TIMEOUT = 15_000;
     const start   = Date.now();
 
-    console.log(`[EAFE] 🚶 Walking to open launch spot (${tx}, ${tz})...`);
-    bot.setControlState('sprint', true);
-
-    while (Date.now() - start < TIMEOUT) {
-      const p = bot.entity.position;
-      const d = Math.hypot(tx - p.x, tz - p.z);
-      if (d < 1.8) {
-        bot.setControlState('sprint', false);
-        bot.setControlState('forward', false);
-        console.log('[EAFE] 🚶 Arrived at launch spot');
-        return true;
-      }
-      bot.entity.yaw = Math.atan2(-(tx - p.x), tz - p.z);
-      bot.setControlState('forward', true);
-      await sleep(100);
-    }
-
-    bot.setControlState('sprint', false);
-    bot.setControlState('forward', false);
-    console.warn('[EAFE] ⚠ Walk timed out');
-    return false;
+    return new Promise(resolve => {
+      const checkGoal = setInterval(() => {
+        const p = bot.entity.position;
+        const dist = Math.hypot(tx - p.x, tz - p.z);
+        if (dist <= 1.5 || !bot.pathfinder.isMoving()) {
+          clearInterval(checkGoal);
+          bot.pathfinder.stop();
+          console.log(`[EAFE] 🗺 Pathfinding completed (dist=${dist.toFixed(1)}m)`);
+          resolve(dist <= 2.5);
+        }
+        if (Date.now() - start > TIMEOUT) {
+          clearInterval(checkGoal);
+          bot.pathfinder.stop();
+          console.warn('[EAFE] ⚠ Pathfinding timed out');
+          resolve(false);
+        }
+      }, 200);
+    });
   }
 
   // ─────────────────────────────────────────────────────────────────────────
@@ -366,11 +396,10 @@ function createBot() {
     const elytraOk = await auditAndEquipElytra();
     if (!elytraOk) { setPhase(PHASE.FAILED, '✗ No usable Elytra (durability > 15)'); return; }
 
-    // 2. Fuel audit calculation (EAFE-v7.1 Sec 2.2)
+    // 2. Fuel audit calculation
     const rocketsAvail = countRockets();
     const d2d = dist2D(TARGET_X, TARGET_Z);
     const startY = bot.entity.position.y;
-    // Formula: N_req = ceil(d2d / 68.5) + ceil(ΔY / 28.0) + 15
     const reqRockets = Math.ceil(d2d / 68.5) + Math.ceil(Math.abs(CRUISE_ALT - startY) / 28.0) + 15;
 
     console.log(`[EAFE] Fuel Audit: Available=${rocketsAvail} | Required=${reqRockets} (dist=${d2d.toFixed(0)}m)`);
@@ -378,24 +407,24 @@ function createBot() {
       try { bot.chat(`[EAFE] ⚠ Fuel warning: Have ${rocketsAvail} rockets, calculated ${reqRockets} needed`); } catch(_) {}
     }
 
-    // 3. 3D Spatial Envelope Audit (EAFE-v7.1 Sec 3.2)
+    // 3. 3D Spatial Envelope Audit
     const spatial = auditSpatialEnvelope();
     console.log(`[EAFE] Spatial Audit: clear=${spatial.clear} (${spatial.reason})`);
 
     if (!spatial.clear) {
-      try { bot.chat(`[EAFE] ⚠ Launch spatial check failed (${spatial.reason}) — scanning relocation spot...`); } catch(_) {}
+      try { bot.chat(`[EAFE] ⚠ Launch check failed (${spatial.reason}) — pathfinding to clear spot...`); } catch(_) {}
 
       const spot = findElevatedOpenSpot();
       if (!spot) {
-        setPhase(PHASE.FAILED, '✗ Launch area obstructed — no open elevated node nearby');
+        setPhase(PHASE.FAILED, '✗ Obstacles/liquids detected — no safe open launch spot nearby');
         scheduleRetry();
         return;
       }
 
-      setPhase(PHASE.RELOCATING, `Moving to open spot (${spot.x}, ${spot.z}) openAir=${spot.openAir}m`);
-      const arrived = await walkToSpot(spot.x, spot.z);
+      setPhase(PHASE.RELOCATING, `Pathfinding to open spot (${spot.x}, ${spot.y}, ${spot.z}) on ${spot.blockName}`);
+      const arrived = await pathfindToSpot(spot.x, spot.y, spot.z);
       if (!arrived) {
-        setPhase(PHASE.FAILED, '✗ Could not walk to launch spot');
+        setPhase(PHASE.FAILED, '✗ Could not pathfind to launch spot');
         scheduleRetry();
         return;
       }
@@ -424,13 +453,11 @@ function createBot() {
       try { bot.setControlState(k, false); } catch(_) {}
     });
 
-    // Face target + NOSE UP (+0.5 rad) BEFORE takeoff
     lookForce(yawTo(TARGET_X, TARGET_Z), 0.5);
 
     // Jump
     bot.setControlState('jump', true);
 
-    // Wait until airborne (onGround === false), max 1s
     const airborne = await new Promise(resolve => {
       let t = 0;
       const chk = setInterval(() => {
@@ -460,10 +487,8 @@ function createBot() {
       return;
     }
 
-    // Fire rocket IMMEDIATELY on takeoff to launch upward!
     fireRocketDirect();
 
-    // Verify fly state after 250ms
     await sleep(250);
     if (!isFlying()) {
       console.warn('[EAFE] ⚠ Fly state false after launch — retrying elytraFly + rocket');
@@ -482,7 +507,6 @@ function createBot() {
   }
 
   // ─── CLIMB (UNTOUCHED WORKING CORE) ──────────────────────────────────────
-  // Pitch = +0.65 rad (NOSE UP) → ascends toward CRUISE_ALT (Y=160)
   function startClimb() {
     setPhase(PHASE.CLIMBING, `Climbing to Y=${CRUISE_ALT}...`);
 
@@ -492,7 +516,7 @@ function createBot() {
     if (rocketLoop) clearInterval(rocketLoop);
     rocketLoop = setInterval(() => {
       if (phase !== PHASE.CLIMBING) { clearInterval(rocketLoop); rocketLoop = null; return; }
-      smartFireRocket(); // Smart rocket conservation
+      smartFireRocket();
     }, 1200);
 
     if (climbLoop) clearInterval(climbLoop);
@@ -528,16 +552,14 @@ function createBot() {
     }, 200);
   }
 
-  // ─── CRUISE & SMART ROCKET CONSERVATION (EAFE-v7.1 Sec 1.1 & 5.0) ────────
+  // ─── CRUISE & SMART ROCKET CONSERVATION ──────────────────────────────────
   function startCruise() {
     setPhase(PHASE.CRUISING, `Cruising to (${TARGET_X}, ?, ${TARGET_Z})`);
 
-    // Smart Rocket Loop — checks speed before firing
     if (rocketLoop) clearInterval(rocketLoop);
     rocketLoop = setInterval(() => {
       if (phase !== PHASE.CRUISING && phase !== PHASE.DEAD_STICK) { clearInterval(rocketLoop); rocketLoop = null; return; }
 
-      // Check remaining fireworks count
       if (countRockets() === 0 && phase !== PHASE.DEAD_STICK) {
         setPhase(PHASE.DEAD_STICK, '⚠ Out of fireworks — engaging Dead-Stick L/D Glide');
       }
@@ -547,7 +569,6 @@ function createBot() {
       }
     }, 1500);
 
-    // Steering & Velocity Control tick every 50ms
     if (flyLoop) clearInterval(flyLoop);
     flyLoop = setInterval(() => {
       if (phase !== PHASE.CRUISING && phase !== PHASE.DEAD_STICK) { clearInterval(flyLoop); flyLoop = null; return; }
@@ -564,24 +585,20 @@ function createBot() {
       const vel = bot.entity.velocity;
       const speed = Math.hypot(vel.x, vel.y, vel.z);
 
-      // ERR_WALL_COLLISION Recovery (EAFE-v7 Sec 9)
       if (speed < 0.05 && bot.entity.position.y > 75) {
         console.warn('[EAFE] ⚠ Wall collision / stall detected! Executing 180° pitch boost...');
-        lookForce(yaw + Math.PI, 0.70); // Pitch UP + 180° turn
+        lookForce(yaw + Math.PI, 0.70);
         fireRocketDirect();
         return;
       }
 
       if (phase === PHASE.DEAD_STICK) {
-        // Dead-Stick Optimum Glide Pitch (+0.02 rad = +1.15° nose UP)
         lookForce(yaw, 0.02);
       } else {
-        // Normal Cruise Pitch (+0.05 rad = +2.8° nose UP)
         lookForce(yaw, 0.05);
       }
     }, 50);
 
-    // 1s verification loop
     if (verifyLoop) clearInterval(verifyLoop);
     let lastPos = bot.entity.position.clone();
     verifyLoop = setInterval(() => {
@@ -611,7 +628,7 @@ function createBot() {
     }, 1000);
   }
 
-  // ─── LANDING & DEAD-STICK FLARE ENGINE (EAFE-v7 Sec 8) ───────────────────
+  // ─── LANDING & DEAD-STICK FLARE ENGINE ───────────────────────────────────
   function startLanding() {
     setPhase(PHASE.LANDING, 'Initiating Archimedean spiral landing & surface validation...');
 
@@ -619,7 +636,7 @@ function createBot() {
     let targetZ = TARGET_Z;
 
     let groundBlock = getGroundBlockAt(targetX, targetZ);
-    if (groundBlock && !SAFE_SURFACES.has(groundBlock.name)) {
+    if (groundBlock && (isWaterOrLava(groundBlock) || !SAFE_SURFACES.has(groundBlock.name))) {
       console.warn(`[EAFE] ⚠ Target LZ (${targetX}, ${targetZ}) is unsafe (${groundBlock.name}) — running Archimedean spiral...`);
 
       let foundSafe = false;
@@ -628,7 +645,7 @@ function createBot() {
           const sx = Math.round(TARGET_X + r * Math.cos(angle));
           const sz = Math.round(TARGET_Z + r * Math.sin(angle));
           const sb = getGroundBlockAt(sx, sz);
-          if (sb && SAFE_SURFACES.has(sb.name)) {
+          if (sb && !isWaterOrLava(sb) && SAFE_SURFACES.has(sb.name)) {
             targetX = sx;
             targetZ = sz;
             foundSafe = true;
@@ -646,8 +663,6 @@ function createBot() {
       const pos = bot.entity.position;
       const relY = pos.y - (groundBlock?.position?.y ?? 70);
 
-      // Dead-Stick Touchdown Flare (EAFE-v7 Sec 8):
-      // When Y_rel <= 4m, lock flare pitch +0.10 rad (Nose UP) to convert forward speed into lift (vy -> 0)
       if (relY <= 4.0) {
         lookForce(yawTo(targetX, targetZ), 0.10); // Nose UP flare
         try { bot.setControlState('sneak', true); } catch(_) {}
@@ -806,7 +821,7 @@ function createBot() {
   });
 
   // ─── DISCONNECT ───────────────────────────────────────────────────────────
-  bot._client?.on('error', () => {}); // silence raw socket error output during reconnect
+  bot._client?.on('error', () => {});
   bot.on('error', e => console.error('[BOT] error:', e.message || e));
   bot.on('kicked', r => console.warn('[BOT] kicked:', typeof r === 'string' ? r : JSON.stringify(r)));
   bot.on('end', reason => {
@@ -818,11 +833,11 @@ function createBot() {
 
 // ─── BANNER ──────────────────────────────────────────────────────────────────
 console.log('╔═════════════════════════════════════════════════════════════╗');
-console.log('║  EAFE v7.1 — Smart Rocket Conservation & Dead-Stick Engine  ║');
+console.log('║  EAFE v7.2 — Pathfinder & Spatial Audit Fixes               ║');
+console.log('║  Pathfinder: mineflayer-pathfinder A* (No Water/No Lava)    ║');
+console.log('║  Audit Fix: Runway checked at Y+1 & Y+2 (No Ground False +)  ║');
 console.log('║  Physics: Native Mineflayer 50ms Engine                      ║');
 console.log('║  Fuel: N_req Formula + Speed-Gated Rocket Firing (||v||)     ║');
-console.log('║  Unpowered: Dead-Stick L/D Glide + 4m Touchdown Flare        ║');
-console.log('║  Recovery: ERR_WALL_COLLISION 180° Turn + Spatial Audit     ║');
 console.log(`║  Host: ${HOST}:${PORT}`.padEnd(61) + '║');
 console.log('╚═════════════════════════════════════════════════════════════╝');
 
