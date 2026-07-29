@@ -1,6 +1,6 @@
 {
   "name": "@eksses/eafe",
-  "version": "11.0.3",
+  "version": "11.0.4",
   "description": "Autonomous elytra flight engine for mineflayer — fly anywhere in Minecraft with 3 lines of code. Handles takeoff, climb, cruise, terrain avoidance, and safe landing automatically.",
   "main": "src/index.js",
   "exports": {
