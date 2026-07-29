@@ -1,28 +1,22 @@
 'use strict';
 /**
- * EAFE v10.3 — Dynamic Unbreaking-Aware Elytra Health & Mid-Flight Auto-Swap Engine
+ * EAFE v10.5 — Goal-First Lawnmower Ocean Scan & Remaining Rocket Reporting
  * ====================================================================================
  * Enhancements:
- *   1. Dynamic Unbreaking-Aware Elytra Durability Audit (calculateRequiredElytraDurability):
- *      - Reads Unbreaking enchantment levels (0, 1, 2, 3) on available Elytras.
- *      - Calculates exact flight time (seconds) and durability consumption rate:
- *          Unbreaking 0: 1.00 durability/sec (100% damage rate)
- *          Unbreaking I: 0.50 durability/sec (50% damage rate)
- *          Unbreaking II: 0.333 durability/sec (33.3% damage rate)
- *          Unbreaking III: 0.25 durability/sec (25% damage rate - 4x lifespan!)
- *      - Pre-flight audit sums durability across ALL usable Elytras in inventory. If total
- *        durability < Durability_req, flight ABORTS immediately and requests more Elytras!
- *   2. Mid-Flight Elytra Auto-Swap & Flight State Recovery (checkMidFlightElytraSwap):
- *      - Monitors equipped Elytra durability during flight. When it drops to <= 15 points:
- *          a. Auto-swaps to the highest durability spare Elytra in inventory.
- *          b. Re-issues bot.elytraFly() packet immediately (since equip cancels elytraFlying).
- *          c. Fires an off-hand firework rocket (fireRocketDirect) to restore flight momentum!
- *   3. Flight Trail Coastline Memory (lastKnownSafeGround):
- *      - Continuously records solid land passed over; if target is ocean, turns back to known coast.
- *   4. Progressive Ultra Low-Power Fuel Saver (WANDER_SCAN Phase):
- *      - Lowers rocket speed gate as rocket count drops (<15 rockets -> 10m/s, <8 -> 8m/s).
- *   5. Straight-Line Grid Lawnmower Search & Chunk Memory Map:
- *      - Flies in 100% straight cardinal legs with zero circle spinning and zero backtracking.
+ *   1. Goal-Location First Ocean Search (startWanderScan):
+ *      - Upon arriving at destination (X, Z), if LZ is open ocean, the bot ALWAYS executes
+ *        a straight-line grid lawnmower search around the GOAL LOCATION FIRST to locate
+ *        islands, shores, or land near the target!
+ *      - Does NOT turn back to base automatically.
+ *   2. Emergency Low-Fuel Coastline Fallback:
+ *      - Flight-trail memory (lastKnownSafeGround) is used ONLY as a true emergency fallback
+ *        if 40+ chunks around goal have been searched and remaining rockets drop to <= 6 (<= 15%).
+ *   3. Remaining Firework Rocket Count in Arrival Announcement:
+ *      - Arrival message now displays remaining fireworks:
+ *        "✅ Destination Reached! Arrived safely at (...) | Rockets remaining: 45/51"
+ *   4. Dynamic Unbreaking-Aware Elytra Health & Mid-Flight Auto-Swap:
+ *      - Audits Unbreaking 1-3 damage rates (25%-50%), sums durability across all inventory Elytras,
+ *        and auto-swaps mid-flight with instant flight recovery.
  *
  * Commands: f [X Z], setgoal X Z, m fast/med/low, s, status, audit.
  */
@@ -1167,6 +1161,20 @@ function createBot() {
         return;
       }
 
+      // Failsafe 3b. Emergency Low-Fuel Return to flight-trail coastline if goal search exhausted
+      if (rCount <= 6 && scannedChunks.size >= 40 && lastKnownSafeGround) {
+        clearInterval(flyLoop); flyLoop = null;
+        console.warn(`[EAFE] ⚠ Low fuel emergency (${rCount} rockets left, ${scannedChunks.size} chunks scanned) — re-routing to last known coastline at (${lastKnownSafeGround.x}, ${lastKnownSafeGround.z})!`);
+        try {
+          bot.chat(`[EAFE] ⚠ Low fuel (${rCount} rockets left)! Returning to last known safe coast at (${lastKnownSafeGround.x}, ${lastKnownSafeGround.z}) on ${lastKnownSafeGround.blockName}!`);
+        } catch(_) {}
+
+        activeTargetX = lastKnownSafeGround.x;
+        activeTargetZ = lastKnownSafeGround.z;
+        startLanding();
+        return;
+      }
+
       // 4. Straight-Line Grid Navigation (Cardinal Legs)
       if (!legStartPos) legStartPos = pos.clone();
       const distOnLeg = Math.hypot(pos.x - legStartPos.x, pos.z - legStartPos.z);
@@ -1208,25 +1216,12 @@ function createBot() {
     let targetX = safeSpot.x;
     let targetZ = safeSpot.z;
 
-    // IF NO SOLID GROUND IN ARRIVAL CHUNKS:
-    // FIRST CHECK FLIGHT TRAIL MEMORY (lastKnownSafeGround) BEFORE SEARCHING DEEP OCEAN!
+    // IF NO SOLID GROUND IN IMMEDIATE ARRIVAL CHUNKS:
+    // ALWAYS SCAN GOAL AREA FIRST via startWanderScan() before falling back to flight trail!
     if (!safeSpot.safe) {
-      if (lastKnownSafeGround) {
-        const trailDist = Math.hypot(lastKnownSafeGround.x - bot.entity.position.x, lastKnownSafeGround.z - bot.entity.position.z);
-        console.warn(`[EAFE] 🏝 FLIGHT TRAIL MEMORY LOCK: Target area (${activeTargetX}, ${activeTargetZ}) is ocean, but solid coastline was flown over ${trailDist.toFixed(0)}m ago! Turning back to (${lastKnownSafeGround.x}, ${lastKnownSafeGround.z}) [${lastKnownSafeGround.blockName}]...`);
-        try {
-          bot.chat(`[EAFE] 🏝 Re-routing to guaranteed solid coastline from flight path at (${lastKnownSafeGround.x}, ${lastKnownSafeGround.z}) on ${lastKnownSafeGround.blockName}!`);
-        } catch(_) {}
-
-        activeTargetX = lastKnownSafeGround.x;
-        activeTargetZ = lastKnownSafeGround.z;
-        targetX       = lastKnownSafeGround.x;
-        targetZ       = lastKnownSafeGround.z;
-      } else {
-        console.warn(`[EAFE] 🌊 CANCEL LANDING: Target area (${activeTargetX}, ${activeTargetZ}) is open ocean with NO solid land nearby & no flight trail memory! Initiating Low-Power Grid Scan...`);
-        startWanderScan();
-        return;
-      }
+      console.warn(`[EAFE] 🌊 Target area (${activeTargetX}, ${activeTargetZ}) is open ocean! Initiating Straight-Line Lawnmower Scan around goal location first...`);
+      startWanderScan();
+      return;
     }
 
     console.log(`[EAFE] ✓ Arrival Chunk Scan: Solid landing spot approved at (${targetX}, ${targetZ}) on [${safeSpot.blockName}]`);
@@ -1264,7 +1259,8 @@ function createBot() {
         retries = 0;
         spatialClear = false; // Reset spatial checkmark on touchdown
 
-        const arrivalMsg = `✅ Destination Reached! Arrived safely at (${Math.round(pos.x)}, ${Math.round(pos.y)}, ${Math.round(pos.z)}) on ${currentBlockUnder?.name || 'solid ground'}`;
+        const rRem = countRockets();
+        const arrivalMsg = `✅ Destination Reached! Arrived safely at (${Math.round(pos.x)}, ${Math.round(pos.y)}, ${Math.round(pos.z)}) on ${currentBlockUnder?.name || 'solid ground'} | Rockets remaining: ${rRem}`;
         setPhase(PHASE.IDLE, arrivalMsg);
         try { bot.chat(`[EAFE] ${arrivalMsg}`); } catch(_) {}
       }
