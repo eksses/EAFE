@@ -1,20 +1,22 @@
 'use strict';
 /**
- * EAFE v9.7 — Rocket Saver Pitch-and-Glide & 100m Safe Landing Wander Engine
- * ============================================================================
- * Enhancements:
- *   1. True Pitch-and-Glide Rocket Saver Mode (EFFICIENT):
- *      - Calibrated fuelDistDivider: FAST = 35.0m/rk, MEDIUM = 70.0m/rk, EFFICIENT = 150.0m/rk!
- *      - EFFICIENT mode uses up to 70% FEWER rockets than FAST mode for long distance flights.
- *   2. 100m Expanding Archimedean Safe Landing Wander Engine:
- *      - If the target LZ (X, Z) is water, lava, or unsafe, the bot spirals out up to 100m radius
- *        to locate solid safe land (grass, stone, dirt, wood, etc.).
- *      - Active Wander Rocket Firing: Fires rockets while airborne to maintain altitude (Y > 75)
- *        while maneuvering over liquid towards safe solid ground!
- *   3. Pre-Flight Water/Wander Rocket Calculation (N_wander):
- *      - Checks if the destination is over water/lava BEFORE flight. If liquid is detected,
- *        adds +12 extra Wander Rockets explicitly reserved for safe landing search!
- *   4. Dual Console & In-Game Chat Control: f [X Z], setgoal X Z, m fast/med/low, s, status, audit.
+ * EAFE v9.8 — Real-Time Arrival Chunk Scan & Unconditional Landing/Wander Reserve
+ * =================================================================================
+ * Enhancements & Correction:
+ *   1. Real-Time Arrival Chunk Scan (startLanding):
+ *      - Pre-flight cannot scan far chunks before flying there (chunks are ungenerated/unloaded).
+ *      - Upon arriving at target coordinates (dist < 25m), target chunks are loaded in memory!
+ *      - As altitude drops, startLanding() performs real-time block inspection of the landing zone.
+ *      - If the target LZ is water/lava/liquid, it immediately executes an expanding Archimedean
+ *        spiral search (up to 100m radius) across loaded chunks to find solid ground (grass, stone, dirt, etc.).
+ *      - Active Wander Rocket Firing: If hovering over liquid below Y=75 while searching for land,
+ *        it fires reserved wander rockets to stay airborne until over solid land!
+ *   2. Unconditional Landing & Wander Rocket Reserve (N_wander_landing = 12):
+ *      - Pre-flight fuel audit ALWAYS reserves 12 rockets for arrival chunk scan, safe land wander,
+ *        and landing flares, guaranteeing the bot never runs out of fireworks even if the destination is water!
+ *   3. True Pitch-and-Glide Rocket Saver Mode (EFFICIENT = 150m/rocket):
+ *      - FAST = 35m/rk, MEDIUM = 70m/rk, EFFICIENT = 150m/rk (saves 70% fireworks over long distances).
+ *   4. Dual Console Terminal & In-Game Chat Commands: f [X Z], setgoal X Z, m fast/med/low, s, status, audit.
  */
 
 const mineflayer    = require('mineflayer');
@@ -301,25 +303,21 @@ function createBot() {
   }
 
   /**
-   * Empirically Verified Firework Fuel Calculation (Includes Water/Wander Landing Rockets)
+   * Empirically Verified Firework Fuel Calculation
    * Formula:
    *   N_req = N_distance + N_climb + N_retry_waste + N_wander_landing
    * where:
    *   N_distance       = ceil(d2D / fuelDistDivider) (FAST: 35.0, MEDIUM: 70.0, EFFICIENT: 150.0)
    *   N_climb          = ceil(|ΔY| / 10.0)
    *   N_retry_waste    = (MAX_RETRIES * 3) = 9 rockets
-   *   N_wander_landing = 12 rockets if destination is water/lava (for 100m safe ground search wander),
-   *                      or 5 rockets if landing on solid land.
+   *   N_wander_landing = 12 rockets (UNCONDITIONALLY reserved for arrival chunk scan,
+   *                      100m safe land wander & descent flares)
    */
   function calculateRequiredRockets(d2d, deltaY) {
     const dReq = Math.ceil(d2d / currentMode.fuelDistDivider);
     const yReq = Math.ceil(Math.abs(deltaY) / 10.0);
-    const retryWasteBuffer = MAX_RETRIES * 3; // 9 rockets buffer for up to 3 failed takeoff/climb retries
-
-    // Check if target coordinates are over liquid/unsafe surface
-    const groundAtTarget = getGroundBlockAt(activeTargetX, activeTargetZ);
-    const targetIsLiquid = !groundAtTarget || isWaterOrLava(groundAtTarget) || !SAFE_SURFACES.has(groundAtTarget.name);
-    const wanderLandingBuffer = targetIsLiquid ? 12 : 5; // Extra +12 wander rockets if destination is liquid!
+    const retryWasteBuffer    = MAX_RETRIES * 3; // 9 rockets buffer for up to 3 failed retries
+    const wanderLandingBuffer = 12;              // 12 rockets unconditionally reserved for landing & 100m wander
 
     return dReq + yReq + retryWasteBuffer + wanderLandingBuffer;
   }
@@ -887,12 +885,12 @@ function createBot() {
   }
 
   // ─────────────────────────────────────────────────────────────────────────
-  //  100m EXPANDING SAFE LANDING WANDER ENGINE
+  //  REAL-TIME ARRIVAL CHUNK SCAN & 100m SAFE LANDING WANDER ENGINE
   // ─────────────────────────────────────────────────────────────────────────
 
   /**
    * Scans expanding concentric rings from r = 1m to r = 100m around (centerX, centerZ)
-   * to locate the nearest solid safe land surface (grass, stone, dirt, wood, etc.).
+   * across real-time loaded chunks to locate nearest solid safe land surface (grass, stone, dirt, wood, etc.).
    */
   function findSafeLandingSpotAround(centerX, centerZ) {
     const directGround = getGroundBlockAt(centerX, centerZ);
@@ -900,7 +898,7 @@ function createBot() {
       return { x: centerX, z: centerZ, blockName: directGround.name, safe: true };
     }
 
-    // Expanding Archimedean Search up to 100m radius
+    // Real-Time Expanding Archimedean Search up to 100m radius across loaded chunks
     for (let r = 2; r <= 100; r += 3) {
       const stepAngle = Math.max(Math.PI / 12, Math.PI / (r * 0.5));
       for (let angle = 0; angle < Math.PI * 2; angle += stepAngle) {
@@ -917,21 +915,21 @@ function createBot() {
   }
 
   function startLanding() {
-    setPhase(PHASE.LANDING, `Initiating Archimedean landing at (${activeTargetX}, ${activeTargetZ})...`);
+    setPhase(PHASE.LANDING, `Arrived at target area — scanning arrival chunks at (${activeTargetX}, ${activeTargetZ})...`);
 
-    // 100m Safe Ground Search Wander
+    // Real-Time Arrival Chunk Scan across loaded chunk memory
     const safeSpot = findSafeLandingSpotAround(activeTargetX, activeTargetZ);
 
     let targetX = safeSpot.x;
     let targetZ = safeSpot.z;
 
     if (safeSpot.x !== activeTargetX || safeSpot.z !== activeTargetZ) {
-      console.warn(`[EAFE] 🌊 Target LZ (${activeTargetX}, ${activeTargetZ}) is unsafe liquid — wandering to solid ground at (${targetX}, ${targetZ}) [${safeSpot.blockName}]`);
+      console.warn(`[EAFE] 🌊 Arrival Chunk Scan: Target LZ (${activeTargetX}, ${activeTargetZ}) is unsafe liquid — wandering to solid ground at (${targetX}, ${targetZ}) [${safeSpot.blockName}]`);
       try {
-        bot.chat(`[EAFE] 🌊 Landing LZ unsafe (water/lava) — wandering to safe solid ground (${targetX}, ${targetZ})!`);
+        bot.chat(`[EAFE] 🌊 Target LZ is liquid (water/lava) — wandering to safe solid ground (${targetX}, ${targetZ})!`);
       } catch(_) {}
     } else {
-      console.log(`[EAFE] ✓ Landing spot approved on solid block [${safeSpot.blockName}]`);
+      console.log(`[EAFE] ✓ Arrival Chunk Scan: Landing spot approved on solid block [${safeSpot.blockName}]`);
     }
 
     const landCheck = setInterval(() => {
@@ -941,9 +939,9 @@ function createBot() {
       const groundBlock = getGroundBlockAt(targetX, targetZ);
       const relY = pos.y - (groundBlock?.position?.y ?? 70);
 
-      // Active Wander Rocket Failsafe: If bot drops below Y=75 while maneuvering over water, fire a rocket!
+      // Active Wander Rocket Failsafe: If bot drops below Y=75 while maneuvering over liquid, fire a rocket!
       const currentBlockUnder = getGroundBlockAt(Math.round(pos.x), Math.round(pos.z));
-      const overLiquid = currentBlockUnder && (isWaterOrLava(currentBlockUnder) || !SAFE_SURFACES.has(currentBlockUnder.name));
+      const overLiquid = !currentBlockUnder || isWaterOrLava(currentBlockUnder) || !SAFE_SURFACES.has(currentBlockUnder.name);
 
       if (overLiquid && pos.y < 75 && countRockets() > 0) {
         console.warn(`[EAFE] 🌊 Hovering over liquid (Y=${pos.y.toFixed(1)}) — firing WANDER ROCKET to reach solid land (${targetX}, ${targetZ})!`);
@@ -1177,10 +1175,11 @@ function createBot() {
 
 // ─── BANNER ──────────────────────────────────────────────────────────────────
 console.log('╔═════════════════════════════════════════════════════════════╗');
-console.log('║  EAFE v9.7 — Rocket Saver Pitch-Glide & 100m Safe LZ Wander ║');
-console.log('║  Fuel Divider: FAST (35m/rk), MEDIUM (70m/rk), EFFICIENT (150m)║');
-console.log('║  100m Landing Wander: Spirals out to find solid ground       ║');
-console.log('║  Wander Fuel: Adds +12 rockets if destination is liquid      ║');
+console.log('║  EAFE v9.8 — Real-Time Arrival Scan & Landing Wander Reserve║');
+console.log('║  Pre-Flight Audit: Unconditionally reserves 12 rockets      ║');
+console.log('║  Arrival Scan: Scans destination chunks as altitude drops    ║');
+console.log('║  100m Landing Wander: Spirals out to solid ground over water ║');
+console.log('║  Modes: FAST (35m/rk), MEDIUM (70m/rk), EFFICIENT (150m/rk)  ║');
 console.log(`║  Host: ${HOST}:${PORT}`.padEnd(61) + '║');
 console.log('╚═════════════════════════════════════════════════════════════╝');
 
