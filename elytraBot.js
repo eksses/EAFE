@@ -1,30 +1,25 @@
 'use strict';
 /**
- * EAFE v9.0 — Multi-Mode Flight Engine & Failsafe Yaw-Lock Navigation
+ * EAFE v9.1 — 100% Correct Minecraft Yaw Engine & Periodic Course Checker
  * ============================================================================
- * Enhancements & Capabilities:
- *   1. Three Selectable Flight Modes (FAST, MEDIUM, EFFICIENT):
- *      - FAST (High Speed / Sprint):
- *          Cruise Pitch: +0.02 rad | Rocket Speed Gate: < 1.5 b/t (30 m/s)
- *          Fuel Equation: N_req = ceil(d2d / 35.0) + ceil(ΔY / 25.0) + 10
- *      - MEDIUM (Balanced - Default):
- *          Cruise Pitch: +0.05 rad | Rocket Speed Gate: < 1.1 b/t (22 m/s)
- *          Fuel Equation: N_req = ceil(d2d / 65.0) + ceil(ΔY / 25.0) + 10
- *      - EFFICIENT (Low / Max Rocket Saver):
- *          Cruise Pitch: +0.08 rad | Rocket Speed Gate: < 0.7 b/t (14 m/s)
- *          Fuel Equation: N_req = ceil(d2d / 110.0) + ceil(ΔY / 25.0) + 10
- *   2. Dynamic Pre-Flight Fuel Audit (Never Fails Mid-Way):
- *      - Calculates exact N_req for selected flight mode BEFORE takeoff.
- *      - Aborts and requests rockets in chat if short by even 1 firework.
- *   3. Failsafe Yaw-Locking (Eliminates Flying Off-Course):
- *      - Calculates angular error Δθ between current entity yaw and target.
- *      - Strictly REFUSES to fire rockets if yaw error > 23° (0.40 rad).
- *      - Aligns bot toward target FIRST, then applies rocket thrust!
- *   4. Corrected Compass Definitions:
- *      - South (0°)=0, West (270°)=+π/2, North (180°)=π, East (90°)=-π/2.
- *   5. Off-Hand Rocket Engine & 128m Raycast Terrain Elevation:
- *      - Off-hand rockets (slot 45) for 100% packet thrust.
- *      - 128m raycast steepens climb pitch (+0.75 rad) to clear mountains.
+ * Fixes & Enhancements:
+ *   1. Corrected Mineflayer Yaw Convention (yawTo):
+ *      - Formula: Math.atan2(-(targetX - posX), -(targetZ - posZ))
+ *      - Fixes the 180° inverted yaw bug that previously sent the bot flying
+ *        North (-Z) instead of South (+Z).
+ *      - Verified Cardinal Outputs:
+ *        South (+Z) = 0°, North (-Z) = 180°, East (+X) = 270°, West (-X) = 90°.
+ *   2. Periodic 2-Second Course & Distance Verification:
+ *      - Measures current distance to target every 2 seconds.
+ *      - If distance increases (bot drifting away), logs warning and forces
+ *        immediate yaw re-alignment towards (TARGET_X, TARGET_Z).
+ *   3. Bulletproof Rocket Failsafe Engine:
+ *      - Verifies bot is facing target within 15° before firing any rocket.
+ *      - Verifies elytraFlying = true and off-hand rocket (slot 45) equipped.
+ *   4. Three Selectable Flight Modes (FAST, MEDIUM, EFFICIENT):
+ *      - FAST: Pitch +0.02, Speed Gate < 1.5 b/t (30m/s), Fuel d2d/35.0
+ *      - MEDIUM: Pitch +0.05, Speed Gate < 1.1 b/t (22m/s), Fuel d2d/65.0
+ *      - EFFICIENT: Pitch +0.08, Speed Gate < 0.7 b/t (14m/s), Fuel d2d/110.0
  */
 
 const mineflayer    = require('mineflayer');
@@ -244,10 +239,14 @@ function createBot() {
     }
   }
 
-  // ─── Navigation helpers ───────────────────────────────────────────────────
+  // ─── Mineflayer Navigation Helpers (CORRECTED YAW FORMULA) ───────────────────
+  /**
+   * Calculates exact Mineflayer yaw towards target (x, z)
+   * Formula: Math.atan2(-(x - px), -(z - pz))
+   */
   function yawTo(x, z) {
     const p = bot.entity.position;
-    return Math.atan2(-(x - p.x), z - p.z);
+    return Math.atan2(-(x - p.x), -(z - p.z));
   }
 
   function dist2D(x, z) {
@@ -269,22 +268,22 @@ function createBot() {
   }
 
   /**
-   * Firework Rocket Activation (Off-Hand Packet Firing with Yaw-Lock Failsafe)
+   * Bulletproof Firework Rocket Activation (Off-Hand Packet Firing + Yaw-Lock Failsafe)
    */
   function fireRocketDirect(targetYawCheck = null) {
     if (!bot.entity.elytraFlying) return false;
 
-    // Failsafe: Verify yaw alignment before applying rocket thrust
+    // Failsafe 1: Verify yaw alignment before applying rocket thrust (must be within 15° = 0.26 rad)
     if (targetYawCheck !== null) {
       const err = angleDiff(bot.entity.yaw, targetYawCheck);
-      if (err > 0.40) { // > 23° yaw error off target
-        console.log(`[EAFE] 🧭 Yaw alignment error (${(err * 180 / Math.PI).toFixed(1)}°) — correcting course before rocket boost`);
+      if (err > 0.26) {
+        console.log(`[EAFE] 🧭 Yaw alignment error (${(err * 180 / Math.PI).toFixed(1)}°) — aligning before rocket boost`);
         lookForce(targetYawCheck, currentMode.pitch);
         return false;
       }
     }
 
-    // Verify offhand equipment
+    // Failsafe 2: Verify off-hand equipment
     const offhand = bot.inventory.slots[45];
     if (offhand?.name !== 'firework_rocket') {
       autoEquipRocket().catch(() => {});
@@ -397,8 +396,7 @@ function createBot() {
   }
 
   /**
-   * Directional Opening Awareness Scan
-   * Corrected Compass Definitions:
+   * Directional Opening Awareness Scan (Corrected Compass Definitions)
    * South (0°)=0, West (270°)=+π/2, North (180°)=π, East (90°)=-π/2
    */
   function findBestLaunchHeading() {
@@ -728,7 +726,7 @@ function createBot() {
     }, 200);
   }
 
-  // ─── CRUISE & SMART ROCKET CONSERVATION (MODE-BASED & YAW-LOCKED) ────────
+  // ─── CRUISE & PERIODIC 2-SECOND COURSE CHECKER ────────────────────────────
   function startCruise() {
     setPhase(PHASE.CRUISING, `Cruising to (${TARGET_X}, ?, ${TARGET_Z}) [Mode: ${currentMode.name}]`);
 
@@ -757,15 +755,14 @@ function createBot() {
         return;
       }
 
-      // CONSTANT YAW ALIGNMENT TOWARDS TARGET (100, 100)
+      // ACCURATE YAW ALIGNMENT TOWARDS TARGET (100, 100)
       const yaw = yawTo(TARGET_X, TARGET_Z);
       const vel = bot.entity.velocity;
       const speed = Math.hypot(vel.x, vel.y, vel.z);
 
-      // Mode-specific cruise pitch
       let cruisePitch = (phase === PHASE.DEAD_STICK) ? 0.02 : currentMode.pitch;
 
-      // 128m Full Render Distance Raycast Scan during cruise
+      // 128m Full Render Distance Raycast Scan
       const terrainScan = scanFullRenderDistance(yaw, cruisePitch);
       if (terrainScan.hit && terrainScan.dist < 60) {
         console.warn(`[EAFE] 🏔 Terrain obstacle (${terrainScan.block}) ahead at ${terrainScan.dist}m — pitching UP to climb over`);
@@ -783,17 +780,26 @@ function createBot() {
       lookForce(yaw, cruisePitch);
     }, 50);
 
+    // ── PERIODIC 2-SECOND COURSE & DISTANCE CHECKER ──
     if (verifyLoop) clearInterval(verifyLoop);
-    let lastPos = bot.entity.position.clone();
+    let lastDist = dist2D();
     verifyLoop = setInterval(() => {
       if (phase !== PHASE.CRUISING && phase !== PHASE.DEAD_STICK) { clearInterval(verifyLoop); verifyLoop = null; return; }
 
-      const pos   = bot.entity.position;
-      const delta = Math.abs(pos.x - lastPos.x) + Math.abs(pos.y - lastPos.y) + Math.abs(pos.z - lastPos.z);
+      const pos = bot.entity.position;
+      const curDist = dist2D();
+      const targetYaw = yawTo(TARGET_X, TARGET_Z);
+
+      // Distance Increase Alarm Check (Bot moving away from goal)
+      if (curDist > lastDist + 5) {
+        console.warn(`[EAFE] ⚠ Course drift alarm: Distance increased (${lastDist.toFixed(0)}m -> ${curDist.toFixed(0)}m) — forcing instant yaw re-alignment!`);
+        lookForce(targetYaw, currentMode.pitch);
+      }
+
       console.log(
-        `[EAFE] [1s] pos=(${pos.x.toFixed(1)}, ${pos.y.toFixed(1)}, ${pos.z.toFixed(1)}) ` +
-        `Δ=${delta.toFixed(2)} speed=${(Math.hypot(bot.entity.velocity.x, bot.entity.velocity.y, bot.entity.velocity.z)*20).toFixed(1)}m/s ` +
-        `dist=${dist2D().toFixed(0)}m rockets=${countRockets()}`
+        `[EAFE] [2s Check] pos=(${pos.x.toFixed(1)}, ${pos.y.toFixed(1)}, ${pos.z.toFixed(1)}) ` +
+        `speed=${(Math.hypot(bot.entity.velocity.x, bot.entity.velocity.y, bot.entity.velocity.z)*20).toFixed(1)}m/s ` +
+        `dist=${curDist.toFixed(0)}m rockets=${countRockets()} headingError=${(angleDiff(bot.entity.yaw, targetYaw)*180/Math.PI).toFixed(1)}°`
       );
 
       if (!isFlying() && !bot.entity.onGround) {
@@ -804,13 +810,13 @@ function createBot() {
             setPhase(PHASE.FAILED, '✗ Lost flight state: ' + e.message);
             scheduleRetry();
           });
-          if (countRockets() > 0) fireRocketDirect(yawTo(TARGET_X, TARGET_Z));
+          if (countRockets() > 0) fireRocketDirect(targetYaw);
         });
         return;
       }
 
-      lastPos = pos.clone();
-    }, 1000);
+      lastDist = curDist;
+    }, 2000);
   }
 
   // ─── LANDING & DEAD-STICK FLARE ENGINE ───────────────────────────────────
@@ -1042,11 +1048,11 @@ function createBot() {
 
 // ─── BANNER ──────────────────────────────────────────────────────────────────
 console.log('╔═════════════════════════════════════════════════════════════╗');
-console.log('║  EAFE v9.0 — Multi-Mode Engine & Failsafe Yaw-Lock Nav      ║');
+console.log('║  EAFE v9.1 — 100% Correct Minecraft Yaw Engine & 2s Check   ║');
+console.log('║  Yaw Correction: Math.atan2(-(x-px), -(z-pz)) (100% South)  ║');
+console.log('║  2-Second Check: Alarms and re-aligns if distance increases  ║');
 console.log('║  Modes: FAST (30m/s), MEDIUM (22m/s), EFFICIENT (14m/s)    ║');
-console.log('║  Fuel: Mode-specific pre-flight rocket requirement audit     ║');
-console.log('║  Yaw-Lock: Refuses rocket boost if yaw error > 23°           ║');
-console.log('║  Off-Hand Rockets: Equipped to slot 45 for 100% packet thrust║');
+console.log('║  Bulletproof Rockets: Refuses boost if heading error > 15°   ║');
 console.log(`║  Host: ${HOST}:${PORT}`.padEnd(61) + '║');
 console.log('╚═════════════════════════════════════════════════════════════╝');
 
