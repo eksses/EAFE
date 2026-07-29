@@ -211,8 +211,8 @@ function createBot() {
     const chunks = Math.min(Math.max(maxDistChunks, 4), 16);
     const blocks = chunks * 16;
 
-    // Calculate optimal scanning altitude: Y_scan = clamp(62 + blocks * 0.6, 95, 160)
-    const scanAlt = Math.min(Math.max(Math.round(62 + blocks * 0.6), 95), 160);
+    // Calculate optimal scanning altitude: Y_scan = clamp(60 + blocks * 0.6, 90, 160)
+    const scanAlt = Math.min(Math.max(Math.round(60 + blocks * 0.6), 90), 160);
 
     return { chunks, blocks, scanAlt };
   }
@@ -1011,7 +1011,7 @@ function createBot() {
         if (countRockets() > 0) fireRocketDirect(yaw);
       }
 
-      if (speed < 0.05 && bot.entity.position.y > 75) {
+      if (speed < 0.05 && bot.entity.position.y > 60) {
         console.warn('[EAFE] ⚠ Wall collision / stall detected! Executing 180° pitch boost...');
         lookForce(yaw + Math.PI, 0.70);
         fireRocketDirect();
@@ -1236,7 +1236,7 @@ function createBot() {
 
       const pos = bot.entity.position;
       const groundBlock = getGroundBlockAt(targetX, targetZ);
-      const relY = pos.y - (groundBlock?.position?.y ?? 70);
+      const relY = pos.y - (groundBlock?.position?.y ?? 60);
 
       // Mid-flight Elytra Auto-Swap check
       checkMidFlightElytraSwap();
@@ -1244,7 +1244,7 @@ function createBot() {
       const currentBlockUnder = getGroundBlockAt(Math.round(pos.x), Math.round(pos.z));
       const overLiquid = !currentBlockUnder || isWaterOrLava(currentBlockUnder) || !SAFE_SURFACES.has(currentBlockUnder.name);
 
-      if (overLiquid && pos.y < 75 && countRockets() > 0) {
+      if (overLiquid && pos.y < 65 && countRockets() > 0) {
         console.warn(`[EAFE] 🌊 Hovering over liquid (Y=${pos.y.toFixed(1)}) — redirecting to safe land (${targetX}, ${targetZ})!`);
         lookForce(yawTo(targetX, targetZ), 0.40);
         fireRocketDirect();
