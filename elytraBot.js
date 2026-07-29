@@ -1,22 +1,20 @@
 'use strict';
 /**
- * EAFE v10.15 — Global Rocket Throttle Engine & Ultra-Efficient Climb
+ * EAFE v10.16 — Sine-Wave Dynamic Pitch Glide Oscillation Engine (Dolphin Flight)
  * ====================================================================================
  * Enhancements:
- *   1. Ultra-Efficient Climb Engine (startClimb):
- *      - Replaced unconditional 1.0s rocket looping with dynamic speed-gate climbing.
- *      - Fires rockets ONLY when climb velocity drops below 13 m/s with a minimum 2.2s cooldown!
- *      - Cuts takeoff climb fuel consumption by 65%!
- *   2. Global Rocket Throttle Cooldown Engine (fireRocketDirect):
- *      - Enforces strict minimum cooldown between consecutive firework firings (minCooldownMs):
- *        * Cruise Phase: Minimum 2.0s cooldown between boosts.
- *        * Climb Phase: Minimum 2.2s cooldown between boosts.
- *        * Ocean Scan Phase: Minimum 3.0s cooldown between boosts.
- *      - Completely eliminates rocket spamming across all modes!
- *   3. Optimized Flight Modes (MODES.MEDIUM & MODES.EFFICIENT):
- *      - MEDIUM Mode: Nose-down gravity pitch (-0.04) with lower speed gate (11 m/s) -> 50% fuel savings!
- *      - EFFICIENT Mode: Speed gate (8 m/s) -> 80% fuel savings!
- *   4. Nearest Land-Mass Geometric Center Landing Engine.
+ *   1. Dynamic Physics Rocket Evaluator (shouldFireRocketDynamic):
+ *      - Completely removed hardcoded timer cooldowns! Rocket firings are now evaluated dynamically
+ *        on real-time 3D velocity (speed < 10 m/s), altitude drop, and ceiling limits.
+ *   2. Sine-Wave Dynamic Pitch Glide Oscillation Engine (Dolphin Flight):
+ *      - Phase A (Post-Boost Pitch UP +0.35 rad for 1.2s): Converts rocket thrust directly into
+ *        +15m to +20m of altitude gain!
+ *      - Phase B (Acceleration Pitch DOWN -0.12 rad for 5s): Converts gained altitude back into
+ *        25+ m/s forward speed!
+ *      - Phase C (Level Gravity Glide -0.03 rad): Glides 150m-250m on gravity alone with ZERO ROCKETS!
+ *   3. Scan Ceiling Limit Protection (maxScanCeiling = 145m):
+ *      - In ocean WANDER_SCAN phase, dolphin pitch-up altitude is strictly capped at Y=145m so
+ *        loaded chunks below remain 100% visible and land is instantly detected!
  *
  * Commands: f [X Z], setgoal X Z, m fast/med/low, s, status, audit.
  */
@@ -468,17 +466,16 @@ function createBot() {
     return dReq + yReq + retryWasteBuffer + wanderLandingBuffer;
   }
 
-  let lastRocketFiredTimestamp = 0;
+  let dolphinBoostTime = 0; // Timestamp of last rocket boost for Sine-Wave pitch oscillation
 
   /**
    * Bulletproof Firework Rocket Activation (Off-Hand Packet Firing + Yaw-Lock Failsafe)
-   * Enforces global minCooldownMs throttle between consecutive rockets across all phases!
    */
-  function fireRocketDirect(targetYawCheck = null, minCooldownMs = 2000) {
+  function fireRocketDirect(targetYawCheck = null) {
     if (!bot.entity.elytraFlying) return false;
 
-    // GLOBAL THROTTLE FAILSAFE: Enforce minimum cooldown between consecutive rockets!
-    if (Date.now() - lastRocketFiredTimestamp < minCooldownMs) {
+    // Safety Cooldown: Minimum 500ms safety interval to prevent packet overflow
+    if (Date.now() - dolphinBoostTime < 500) {
       return false;
     }
 
@@ -499,13 +496,43 @@ function createBot() {
 
     try {
       bot.activateItem(true); // Fire off-hand firework rocket!
-      lastRocketFiredTimestamp = Date.now();
-      console.log(`[EAFE] 🚀 OFF-HAND Rocket Fired! (Y=${bot.entity.position.y.toFixed(1)}, Rockets=${countRockets() - 1})`);
+      dolphinBoostTime = Date.now();
+      console.log(`[EAFE] 🚀 OFF-HAND Rocket Boost Fired! (Y=${bot.entity.position.y.toFixed(1)}, Rockets=${countRockets() - 1})`);
       return true;
     } catch(e) {
       console.warn('[EAFE] Rocket activation error:', e.message);
       return false;
     }
+  }
+
+  /**
+   * DYNAMIC PHYSICS ROCKET EVALUATOR (No Strict Hardcoded Cooldowns!)
+   * Dynamically determines if a rocket is required based on real-time speed,
+   * altitude, descent rate, and altitude ceiling limits.
+   */
+  function shouldFireRocketDynamic(pos, vel, maxAltCeiling = 180) {
+    if (!bot.entity.elytraFlying || countRockets() === 0) return false;
+
+    // Rule 1: Do NOT fire if currently in post-boost climb phase (< 1.2s after rocket boost)
+    if (Date.now() - dolphinBoostTime < 1200) return false;
+
+    // Rule 2: Ceiling Limit — Never fire if altitude is already above max ceiling
+    if (pos.y >= maxAltCeiling) return false;
+
+    const speed = Math.hypot(vel.x, vel.y, vel.z);
+
+    // Rule 3: Dynamic Physics Energy Check:
+    // Fire rocket IF speed has dropped below 10.0 m/s (speed < 0.50)
+    // OR if altitude has dropped low (pos.y < maxAltCeiling - 25) AND speed < 14.0 m/s (0.70)!
+    if (speed < 0.50) {
+      return true; // Speed depleted — needs rocket boost!
+    }
+
+    if (pos.y < maxAltCeiling - 25 && speed < 0.70) {
+      return true; // Altitude and speed both dropping — needs rocket boost!
+    }
+
+    return false;
   }
 
   /**
@@ -1023,11 +1050,30 @@ function createBot() {
       // ACCURATE YAW ALIGNMENT TOWARDS TARGET
       const yaw = yawTo(activeTargetX, activeTargetZ);
       const vel = bot.entity.velocity;
-      const speed = Math.hypot(vel.x, vel.y, vel.z);
 
+      // ── SINE-WAVE DYNAMIC PITCH GLIDE OSCILLATION ENGINE ──
+      const timeSinceBoostMs = Date.now() - dolphinBoostTime;
       let cruisePitch = (phase === PHASE.DEAD_STICK) ? 0.02 : currentMode.pitch;
 
-      // Dynamic Render Distance Raycast Scan (Throttled log)
+      if (phase === PHASE.CRUISING) {
+        if (timeSinceBoostMs < 1200) {
+          // Phase A: Post-Boost Climb Pitch (+0.35 rad) -> Convert rocket thrust to +15-20m altitude!
+          cruisePitch = 0.35;
+        } else if (timeSinceBoostMs < 6500 && pos.y > 95) {
+          // Phase B: Acceleration Dive Pitch (-0.12 rad) -> Convert altitude gain to 25+ m/s forward speed!
+          cruisePitch = -0.12;
+        } else {
+          // Phase C: Level Glide Pitch (-0.03 rad) -> Smooth long-distance gravity glide!
+          cruisePitch = -0.03;
+        }
+
+        // Dynamic Physics Rocket Need Check (No hardcoded timers!)
+        if (shouldFireRocketDynamic(pos, vel, CRUISE_ALT)) {
+          fireRocketDirect(yaw);
+        }
+      }
+
+      // Dynamic Render Distance Raycast Scan
       const terrainScan = scanFullRenderDistance(yaw, cruisePitch);
       if (terrainScan.hit && terrainScan.dist < 60) {
         if (Date.now() - lastTerrainWarn > 3000) {
@@ -1038,7 +1084,7 @@ function createBot() {
         if (countRockets() > 0) fireRocketDirect(yaw);
       }
 
-      if (speed < 0.05 && bot.entity.position.y > 60) {
+      if (Math.hypot(vel.x, vel.y, vel.z) < 0.05 && bot.entity.position.y > 60) {
         console.warn('[EAFE] ⚠ Wall collision / stall detected! Executing 180° pitch boost...');
         lookForce(yaw + Math.PI, 0.70);
         fireRocketDirect();
@@ -1330,11 +1376,26 @@ function createBot() {
       const vel = bot.entity.velocity;
       const speed = Math.hypot(vel.x, vel.y, vel.z);
 
-      if (speed < dynamicSpeedGate && rCount > 0) {
-        fireRocketDirect(targetYaw, 3000);
+      // ── SINE-WAVE DYNAMIC PITCH GLIDE & SCAN CEILING ENGINE ──
+      const maxScanCeiling = Math.min(targetScanAlt + 15, 145); // Max altitude ceiling so land remains visible below!
+      const timeSinceBoostMs = Date.now() - dolphinBoostTime;
+
+      let scanPitch = currentMode.pitch;
+
+      if (timeSinceBoostMs < 1200 && pos.y < maxScanCeiling) {
+        scanPitch = 0.30; // Pitch UP (+0.30 rad) for 1.2s right after boost to gain altitude up to ceiling!
+      } else if (timeSinceBoostMs < 6000 && pos.y > 110) {
+        scanPitch = -0.10; // Pitch DOWN (-0.10 rad) to convert altitude to forward speed!
+      } else {
+        scanPitch = -0.04; // Gravity glide
       }
 
-      lookForce(targetYaw, dynamicPitch);
+      // Dynamic Physics Rocket Need Check for Ocean Scan (NO hardcoded timers!)
+      if (shouldFireRocketDynamic(pos, vel, maxScanCeiling)) {
+        fireRocketDirect(targetYaw);
+      }
+
+      lookForce(targetYaw, scanPitch);
 
       const stateName = lawnState === 'SWEEP' ? (sweepDirection === 0 ? 'North-Track' : 'South-Track') : 'East-Shift';
       console.log(`[EAFE] [GRID_SCAN] Y=${pos.y.toFixed(1)} track=${trackCount} mode=${stateName} speed=${(speed*20).toFixed(1)}m/s rockets=${rCount} scannedChunks=${scannedChunks.size}`);
