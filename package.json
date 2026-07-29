@@ -1,5 +1,5 @@
 {
-  "name": "eafe",
+  "name": "@eksses/eafe",
   "version": "11.0.1",
   "description": "Autonomous elytra flight engine for mineflayer — 3 lines to fly anywhere in Minecraft",
   "main": "src/index.js",

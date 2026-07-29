@@ -1,5 +1,5 @@
 const mineflayer = require('mineflayer');
-const { ElytraFlight } = require('eafe');
+const { ElytraFlight } = require('@eksses/eafe');
 
 const BOTS = [
   { name: 'Scout1', host: 'localhost', port: 25565 },

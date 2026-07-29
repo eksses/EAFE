@@ -1,5 +1,5 @@
 const mineflayer = require('mineflayer');
-const { ElytraFlight } = require('eafe');
+const { ElytraFlight } = require('@eksses/eafe');
 
 const bot = mineflayer.createBot({
   host: 'localhost',

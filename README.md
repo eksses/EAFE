@@ -17,7 +17,7 @@
 ## Install
 
 ```bash
-npm install eafe mineflayer
+npm install @eksses/eafe mineflayer
 ```
 
 ## Quick Start
