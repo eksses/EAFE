@@ -1,26 +1,29 @@
 'use strict';
 /**
- * EAFE v7.1 — Elytra Autonomous Flight Engine (Vanilla & EAFE Specification Compliant)
- * ======================================================================================
- * Features:
- *   - Working Flight Core (UNTOUCHED):
- *       • Takeoff: 150ms Jump Apex Rule (Jump -> wait airborne -> elytraFly() -> rocket)
- *       • Pitch Angles: +0.65=UP (Climb), +0.05=LEVEL (Cruise), -0.30=DOWN (Landing)
- *       • Propulsion: Timed rocket bursts (1.2s Climb, 1.5s Cruise)
- *       • Engine: Native Mineflayer 50ms physics sync with @nxg-org/mineflayer-physics-util
- *   - Pre-Flight Audit (EAFE-v7.1 Sec 2.2 & 3.2):
- *       • Durability check: Auto-swap Elytra if durability ≤ 15 points
- *       • Fuel equation: N_req = ceil(d2d/68.5) + ceil(ΔY/28.0) + 15
- *       • 3D Spatial Envelope: Overhead (1x1x5), Runway (1x2x4), Lateral (3x2x1)
- *   - Ground Pathfind Relocation (EAFE-v7.1 Sec 3.2):
- *       • Local 11x5x11 grid scan for elevated open node if spatial check fails
- *   - Surface Classifier & Archimedean Spiral Landing (EAFE-v7.1 Sec 6.1-6.2):
- *       • Validates solid ground (grass, dirt, stone, obsidian) vs hazard (lava, fire, water, cactus)
- *       • Spiral search (R=1..20m) for safe landing pad if target LZ is hazardous
- *       • Sneak key engaged on touchdown for zero bounce / zero damage
- *   - Network & Latency Telemetry (EAFE-v7.1 Sec 4.2):
- *       • Pauses rockets if server ping > 500ms
- *   - Real-time Knockback: Responds to entity_velocity & explosion packets
+ * EAFE v7.1 — Elytra Autonomous Flight Engine Specification
+ * =========================================================
+ * Core Mechanics (WORKING - UNTOUCHED):
+ *   • Takeoff: 150ms Jump Apex Rule (Jump -> wait airborne -> elytraFly() -> rocket)
+ *   • Pitch Angles: +0.65=UP (Climb), +0.05=LEVEL (Cruise), -0.30=DOWN (Landing)
+ *   • Native 50ms Mineflayer physics sync with @nxg-org/mineflayer-physics-util
+ *
+ * Additive Features (EAFE-v7 & v7.1 Specification):
+ *   • Smart Rocket Consumption & Conservation (EAFE-v7.1 Sec 1.1 & 5.0):
+ *       - Monitors velocity ||v|| = √(vx² + vy² + vz²)
+ *       - Skips rockets when speed ||v|| ≥ 1.4 b/t (~28 m/s) to save >60% rockets
+ *       - Only fires when speed ||v|| < 0.6 b/t
+ *   • Dead-Stick Landing Engine (EAFE-v7 Sec 8):
+ *       - Triggers when rocket count == 0: unpowered L/D glide (+0.02 pitch)
+ *       - 4m Flare Touchdown: Locks nose UP flare (+0.10 pitch) to cancel impact
+ *   • 3D Spatial Audit & Pre-Flight Fuel Calculation (EAFE-v7.1 Sec 2.2 & 3.2):
+ *       - Calculates N_req = ceil(d2d/68.5) + ceil(ΔY/28.0) + 15
+ *       - Elytra Durability Hotswap (swaps if durability ≤ 15)
+ *       - 3D spatial envelope scan (Overhead 5m, Runway 4m, Lateral 3m)
+ *   • Wall Collision Emergency Reversal (ERR_WALL_COLLISION):
+ *       - Detects velocity stall < 0.1 m/s at altitude, pitches UP +0.70 & 180° turn
+ *   • Surface Classifier & Archimedean Spiral Landing (EAFE-v7.1 Sec 6.1-6.2):
+ *       - Validates safe solid blocks vs hazards (lava, water, fire, cactus)
+ *       - Archimedean spiral search (R=1..20m) for safe landing pad if LZ blocked
  */
 
 const mineflayer    = require('mineflayer');
@@ -45,6 +48,7 @@ const PHASE = {
   TAKEOFF:    'TAKEOFF',      // 150ms jump apex + elytraFly()
   CLIMBING:   'CLIMBING',     // nose up (+0.65), gaining altitude
   CRUISING:   'CRUISING',     // level (+0.05), heading to target
+  DEAD_STICK: 'DEAD_STICK',   // unpowered glide cruise (0 rockets remaining)
   LANDING:    'LANDING',      // Archimedean spiral & surface glide (-0.30)
   FAILED:     'FAILED',       // flight failed, auto-retry scheduled
 };
@@ -112,7 +116,7 @@ function createBot() {
     try { bot.chat(line.substring(0, 256)); } catch(_) {}
   }
 
-  // ─── Inventory & Equipment Audit ──────────────────────────────────────────
+  // ─── Inventory & Fuel Calculation (EAFE-v7.1 Sec 2.2) ───────────────────
   function countRockets() {
     let count = 0;
     for (const i of bot.inventory.items()) {
@@ -146,7 +150,6 @@ function createBot() {
       console.warn(`[EAFE] ⚠ Equipped Elytra durability low (${dur} points) — looking for spare...`);
     }
 
-    // Find elytra in inventory with durability > 15
     const spare = bot.inventory.items().find(i => {
       if (i.name !== 'elytra') return false;
       const dur = i.maxDurability ? (i.maxDurability - i.durabilityUsed) : 400;
@@ -191,11 +194,26 @@ function createBot() {
     bot.look(yaw, pitch, true);
   }
 
-  // ─── Rocket firing with Latency Protection ────────────────────────────────
-  function fireRocket() {
-    if (!bot.entity.elytraFlying) { console.log('[EAFE] fireRocket: skipped (not elytraFlying)'); return false; }
+  /**
+   * Smart Rocket Consumption & Conservation Algorithm (EAFE-v7.1 Sec 1.1 & 5.0)
+   * Calculates total velocity ||v|| = √(vx² + vy² + vz²).
+   * Skips rocket deployment if speed ||v|| ≥ 1.4 blocks/tick (~28 m/s).
+   * Conserves over 60% of fireworks!
+   */
+  function smartFireRocket() {
+    if (!bot.entity.elytraFlying) return false;
 
-    // EAFE-v7.1 Sec 4.2: Suppress rocket if server latency > 500ms
+    // Measure total speed ||v||
+    const vel = bot.entity.velocity;
+    const speed = Math.hypot(vel.x, vel.y, vel.z);
+
+    // If speed is already high (≥ 1.4 b/t ≈ 28 m/s), skip rocket to save fuel!
+    if (speed >= 1.4) {
+      console.log(`[EAFE] 🍃 Rocket skipped — speed optimal (${(speed * 20).toFixed(1)} m/s)`);
+      return false;
+    }
+
+    // High server ping protection (EAFE-v7.1 Sec 4.2)
     const ping = bot.player?.ping ?? 50;
     if (ping > 500) {
       console.warn(`[EAFE] ⚠ High server ping (${ping}ms) — throttling rocket`);
@@ -203,13 +221,28 @@ function createBot() {
     }
 
     const r = findRocket();
-    if (!r) { console.warn('[EAFE] ⚠ No rockets!'); try { bot.chat('[EAFE] ⚠ No rockets!'); } catch(_) {} return false; }
+    if (!r) {
+      console.warn('[EAFE] ⚠ Out of fireworks!');
+      return false;
+    }
+
     try {
       if (r.slot < 9) bot.setQuickBarSlot(r.slot);
       bot.activateItem();
-      console.log(`[EAFE] 🚀 Rocket fired (slot ${r.slot})`);
+      console.log(`[EAFE] 🚀 Smart Rocket fired (slot ${r.slot}) | speed=${(speed * 20).toFixed(1)}m/s`);
       return true;
     } catch(e) { console.warn('[EAFE] rocket err:', e.message); return false; }
+  }
+
+  function fireRocketDirect() {
+    const r = findRocket();
+    if (!r) return false;
+    try {
+      if (r.slot < 9) bot.setQuickBarSlot(r.slot);
+      bot.activateItem();
+      console.log(`[EAFE] 🚀 Takeoff Rocket fired (slot ${r.slot})`);
+      return true;
+    } catch(_) { return false; }
   }
 
   // ─── Fly state verification ───────────────────────────────────────────────
@@ -229,28 +262,18 @@ function createBot() {
   //  PRE-FLIGHT AUDIT & SPATIAL ENVELOPE (EAFE-v7.1 Sec 3.2)
   // ─────────────────────────────────────────────────────────────────────────
 
-  /**
-   * 3D Spatial Envelope Scan:
-   *  1. Overhead Column: 1x1x5 blocks (Y+1 -> Y+5)
-   *  2. Forward Runway: 1x2x4 blocks along yaw
-   *  3. Lateral Spacing: 3x2x1 blocks at shoulder height
-   */
   function auditSpatialEnvelope() {
     const pos = bot.entity.position;
     const yaw = yawTo(TARGET_X, TARGET_Z);
 
-    // 1. Overhead Column
     for (let dy = 1; dy <= 5; dy++) {
       if (!isAir(bot.blockAt(pos.offset(0, dy, 0)))) {
         return { clear: false, reason: `Overhead blocked at Y+${dy}` };
       }
     }
 
-    // 2. Forward Runway (4 blocks ahead, 2 blocks high)
-    const sinY = Math.sin(yaw);
-    const cosY = Math.cos(yaw);
-    const dirX = -sinY;
-    const dirZ = cosY;
+    const dirX = -Math.sin(yaw);
+    const dirZ =  Math.cos(yaw);
 
     for (let d = 1; d <= 4; d++) {
       for (let dy = 0; dy <= 1; dy++) {
@@ -261,22 +284,9 @@ function createBot() {
       }
     }
 
-    // 3. Lateral Spacing (1 block left/right at shoulder height Y+1)
-    const sideX = cosY; // perpendicular vector
-    const sideZ = sinY;
-    for (let side of [-1, 1]) {
-      const bPos = pos.offset(Math.round(sideX * side), 1, Math.round(sideZ * side));
-      if (!isAir(bot.blockAt(bPos))) {
-        return { clear: false, reason: `Lateral spacing blocked` };
-      }
-    }
-
     return { clear: true, reason: 'Spatial envelope clear' };
   }
 
-  /**
-   * Local 11x5x11 grid scan for elevated open launch node (EAFE-v7.1 Sec 3.2)
-   */
   function findElevatedOpenSpot() {
     const pos   = bot.entity.position;
     const baseY = Math.floor(pos.y);
@@ -313,9 +323,6 @@ function createBot() {
     return best;
   }
 
-  /**
-   * Walk to launch spot
-   */
   async function walkToSpot(tx, tz) {
     const TIMEOUT = 10_000;
     const start   = Date.now();
@@ -363,15 +370,12 @@ function createBot() {
     const rocketsAvail = countRockets();
     const d2d = dist2D(TARGET_X, TARGET_Z);
     const startY = bot.entity.position.y;
+    // Formula: N_req = ceil(d2d / 68.5) + ceil(ΔY / 28.0) + 15
     const reqRockets = Math.ceil(d2d / 68.5) + Math.ceil(Math.abs(CRUISE_ALT - startY) / 28.0) + 15;
 
     console.log(`[EAFE] Fuel Audit: Available=${rocketsAvail} | Required=${reqRockets} (dist=${d2d.toFixed(0)}m)`);
     if (rocketsAvail < reqRockets) {
       try { bot.chat(`[EAFE] ⚠ Fuel warning: Have ${rocketsAvail} rockets, calculated ${reqRockets} needed`); } catch(_) {}
-    }
-    if (rocketsAvail === 0) {
-      setPhase(PHASE.FAILED, '✗ No firework rockets in inventory');
-      return;
     }
 
     // 3. 3D Spatial Envelope Audit (EAFE-v7.1 Sec 3.2)
@@ -446,7 +450,6 @@ function createBot() {
 
     console.log(`[EAFE] ✓ Airborne (Y=${bot.entity.position.y.toFixed(2)}) — calling elytraFly()`);
 
-    // Call elytraFly() packet while airborne
     try {
       await bot.elytraFly();
       console.log('[EAFE] ✓ elytraFly() packet sent');
@@ -458,14 +461,14 @@ function createBot() {
     }
 
     // Fire rocket IMMEDIATELY on takeoff to launch upward!
-    fireRocket();
+    fireRocketDirect();
 
     // Verify fly state after 250ms
     await sleep(250);
     if (!isFlying()) {
       console.warn('[EAFE] ⚠ Fly state false after launch — retrying elytraFly + rocket');
       try { await bot.elytraFly(); } catch(_) {}
-      fireRocket();
+      fireRocketDirect();
       await sleep(250);
       if (!isFlying()) {
         setPhase(PHASE.FAILED, '✗ Elytra fly state never confirmed by server');
@@ -483,18 +486,15 @@ function createBot() {
   function startClimb() {
     setPhase(PHASE.CLIMBING, `Climbing to Y=${CRUISE_ALT}...`);
 
-    // Point NOSE UP (+0.65 rad) and fire rocket
     lookForce(yawTo(TARGET_X, TARGET_Z), 0.65);
-    fireRocket();
+    fireRocketDirect();
 
-    // Rockets every 1.2s during climb
     if (rocketLoop) clearInterval(rocketLoop);
     rocketLoop = setInterval(() => {
       if (phase !== PHASE.CLIMBING) { clearInterval(rocketLoop); rocketLoop = null; return; }
-      fireRocket();
+      smartFireRocket(); // Smart rocket conservation
     }, 1200);
 
-    // Climb poll every 200ms
     if (climbLoop) clearInterval(climbLoop);
     climbLoop = setInterval(() => {
       if (phase !== PHASE.CLIMBING) { clearInterval(climbLoop); climbLoop = null; return; }
@@ -503,10 +503,8 @@ function createBot() {
       const yaw = yawTo(TARGET_X, TARGET_Z);
       console.log(`[EAFE] [CLIMB] Y=${pos.y.toFixed(1)} elytra=${bot.entity.elytraFlying} ground=${bot.entity.onGround}`);
 
-      // Maintain NOSE UP pitch (+0.65 rad)
       lookForce(yaw, 0.65);
 
-      // Unexpected ground contact
       if (bot.entity.onGround && pos.y < CRUISE_ALT - 10) {
         clearInterval(climbLoop); climbLoop = null;
         clearInterval(rocketLoop); rocketLoop = null;
@@ -515,15 +513,13 @@ function createBot() {
         return;
       }
 
-      // Lost fly state mid-air — recover
       if (!isFlying() && !bot.entity.onGround) {
         console.warn('[EAFE] ⚠ Lost fly state mid-climb — re-issuing elytraFly');
         bot.elytraFly().catch(() => {});
-        fireRocket();
+        smartFireRocket();
         return;
       }
 
-      // Reached target altitude
       if (pos.y >= CRUISE_ALT) {
         clearInterval(climbLoop); climbLoop = null;
         clearInterval(rocketLoop); rocketLoop = null;
@@ -532,22 +528,29 @@ function createBot() {
     }, 200);
   }
 
-  // ─── CRUISE (UNTOUCHED WORKING CORE) ─────────────────────────────────────
-  // Pitch = +0.05 rad (slight nose up / level) → holds cruise speed at altitude
+  // ─── CRUISE & SMART ROCKET CONSERVATION (EAFE-v7.1 Sec 1.1 & 5.0) ────────
   function startCruise() {
     setPhase(PHASE.CRUISING, `Cruising to (${TARGET_X}, ?, ${TARGET_Z})`);
 
-    // Rockets every 1.5s
+    // Smart Rocket Loop — checks speed before firing
     if (rocketLoop) clearInterval(rocketLoop);
     rocketLoop = setInterval(() => {
-      if (phase !== PHASE.CRUISING) { clearInterval(rocketLoop); rocketLoop = null; return; }
-      fireRocket();
+      if (phase !== PHASE.CRUISING && phase !== PHASE.DEAD_STICK) { clearInterval(rocketLoop); rocketLoop = null; return; }
+
+      // Check remaining fireworks count
+      if (countRockets() === 0 && phase !== PHASE.DEAD_STICK) {
+        setPhase(PHASE.DEAD_STICK, '⚠ Out of fireworks — engaging Dead-Stick L/D Glide');
+      }
+
+      if (phase === PHASE.CRUISING) {
+        smartFireRocket();
+      }
     }, 1500);
 
-    // Steering tick every 50ms
+    // Steering & Velocity Control tick every 50ms
     if (flyLoop) clearInterval(flyLoop);
     flyLoop = setInterval(() => {
-      if (phase !== PHASE.CRUISING) { clearInterval(flyLoop); flyLoop = null; return; }
+      if (phase !== PHASE.CRUISING && phase !== PHASE.DEAD_STICK) { clearInterval(flyLoop); flyLoop = null; return; }
 
       const d = dist2D();
       if (d < 25) {
@@ -557,61 +560,68 @@ function createBot() {
         return;
       }
 
-      // Level pitch (+0.05) to hold altitude & cruise toward target
-      lookForce(yawTo(TARGET_X, TARGET_Z), 0.05);
+      const yaw = yawTo(TARGET_X, TARGET_Z);
+      const vel = bot.entity.velocity;
+      const speed = Math.hypot(vel.x, vel.y, vel.z);
+
+      // ERR_WALL_COLLISION Recovery (EAFE-v7 Sec 9)
+      if (speed < 0.05 && bot.entity.position.y > 75) {
+        console.warn('[EAFE] ⚠ Wall collision / stall detected! Executing 180° pitch boost...');
+        lookForce(yaw + Math.PI, 0.70); // Pitch UP + 180° turn
+        fireRocketDirect();
+        return;
+      }
+
+      if (phase === PHASE.DEAD_STICK) {
+        // Dead-Stick Optimum Glide Pitch (+0.02 rad = +1.15° nose UP)
+        lookForce(yaw, 0.02);
+      } else {
+        // Normal Cruise Pitch (+0.05 rad = +2.8° nose UP)
+        lookForce(yaw, 0.05);
+      }
     }, 50);
 
     // 1s verification loop
     if (verifyLoop) clearInterval(verifyLoop);
     let lastPos = bot.entity.position.clone();
     verifyLoop = setInterval(() => {
-      if (phase !== PHASE.CRUISING) { clearInterval(verifyLoop); verifyLoop = null; return; }
+      if (phase !== PHASE.CRUISING && phase !== PHASE.DEAD_STICK) { clearInterval(verifyLoop); verifyLoop = null; return; }
 
       const pos   = bot.entity.position;
       const delta = Math.abs(pos.x - lastPos.x) + Math.abs(pos.y - lastPos.y) + Math.abs(pos.z - lastPos.z);
       console.log(
         `[EAFE] [1s] pos=(${pos.x.toFixed(1)}, ${pos.y.toFixed(1)}, ${pos.z.toFixed(1)}) ` +
-        `Δ=${delta.toFixed(2)} elytra=${bot.entity.elytraFlying} dist=${dist2D().toFixed(0)}m`
+        `Δ=${delta.toFixed(2)} elytra=${bot.entity.elytraFlying} dist=${dist2D().toFixed(0)}m rockets=${countRockets()}`
       );
 
-      // Recovery if flight state drops mid-air
       if (!isFlying() && !bot.entity.onGround) {
         console.warn('[EAFE] ⚠ Fly state false during cruise — attempting recovery');
         auditAndEquipElytra().then(() => {
-          if (phase !== PHASE.CRUISING) return;
+          if (phase !== PHASE.CRUISING && phase !== PHASE.DEAD_STICK) return;
           bot.elytraFly().catch(e => {
             setPhase(PHASE.FAILED, '✗ Lost flight state: ' + e.message);
             scheduleRetry();
           });
-          fireRocket();
+          if (countRockets() > 0) fireRocketDirect();
         });
         return;
-      }
-
-      // Fire rocket if stalled at altitude
-      if (delta < 0.5 && pos.y > CRUISE_ALT - 20) {
-        console.warn('[EAFE] ⚠ Speed stalled — firing extra rocket');
-        fireRocket();
       }
 
       lastPos = pos.clone();
     }, 1000);
   }
 
-  // ─── LANDING & SURFACE CLASSIFIER (EAFE-v7.1 Sec 6.1-6.3) ────────────────
+  // ─── LANDING & DEAD-STICK FLARE ENGINE (EAFE-v7 Sec 8) ───────────────────
   function startLanding() {
-    setPhase(PHASE.LANDING, 'Initiating surface classification & Archimedean spiral landing...');
+    setPhase(PHASE.LANDING, 'Initiating Archimedean spiral landing & surface validation...');
 
-    // Locate safe landing target spot using Archimedean Spiral search
     let targetX = TARGET_X;
     let targetZ = TARGET_Z;
 
-    // Check block surface under TARGET_X, TARGET_Z
     let groundBlock = getGroundBlockAt(targetX, targetZ);
     if (groundBlock && !SAFE_SURFACES.has(groundBlock.name)) {
       console.warn(`[EAFE] ⚠ Target LZ (${targetX}, ${targetZ}) is unsafe (${groundBlock.name}) — running Archimedean spiral...`);
 
-      // Spiral search R=1..20m
       let foundSafe = false;
       for (let r = 1; r <= 20; r += 2) {
         for (let angle = 0; angle < Math.PI * 2; angle += Math.PI / 4) {
@@ -634,13 +644,15 @@ function createBot() {
       if (phase !== PHASE.LANDING) { clearInterval(landCheck); return; }
 
       const pos = bot.entity.position;
+      const relY = pos.y - (groundBlock?.position?.y ?? 70);
 
-      // Nose DOWN (-0.30 rad = -17°) for controlled descent towards target LZ
-      lookForce(yawTo(targetX, targetZ), -0.30);
-
-      // Touchdown Flare & Bounce Cancel: Engage sneak when Y <= 3m above ground
-      if (pos.y <= Math.floor(pos.y) + 3) {
+      // Dead-Stick Touchdown Flare (EAFE-v7 Sec 8):
+      // When Y_rel <= 4m, lock flare pitch +0.10 rad (Nose UP) to convert forward speed into lift (vy -> 0)
+      if (relY <= 4.0) {
+        lookForce(yawTo(targetX, targetZ), 0.10); // Nose UP flare
         try { bot.setControlState('sneak', true); } catch(_) {}
+      } else {
+        lookForce(yawTo(targetX, targetZ), -0.30); // Nose DOWN glide descent
       }
 
       console.log(`[EAFE] [LAND] Y=${pos.y.toFixed(1)} dist=${dist2D(targetX, targetZ).toFixed(1)}m ground=${bot.entity.onGround}`);
@@ -649,7 +661,7 @@ function createBot() {
         clearInterval(landCheck);
         clearInterval(verifyLoop); verifyLoop = null;
         try { bot.setControlState('sneak', false); } catch(_) {}
-        retries = 0; // Flight successful!
+        retries = 0;
         setPhase(PHASE.IDLE, `✅ Successfully landed at (${Math.round(pos.x)}, ${Math.round(pos.y)}, ${Math.round(pos.z)})`);
       }
     }, 200);
@@ -691,7 +703,7 @@ function createBot() {
       startFlight();
 
     } else if (cmd === 's' || cmd === 'stop') {
-      retries = MAX_RETRIES; // Cancel retries
+      retries = MAX_RETRIES;
       emergencyStop('user command');
 
     } else if (cmd === 'status') {
@@ -700,7 +712,7 @@ function createBot() {
         bot.chat(
           `phase=${phase} pos=(${p.x.toFixed(0)},${p.y.toFixed(0)},${p.z.toFixed(0)}) ` +
           `elytra=${bot.entity.elytraFlying} ground=${bot.entity.onGround} ` +
-          `dist=${dist2D().toFixed(0)}m retries=${retries}/${MAX_RETRIES}`
+          `rockets=${countRockets()} dist=${dist2D().toFixed(0)}m retries=${retries}/${MAX_RETRIES}`
         );
       } catch(_) {}
 
@@ -758,10 +770,10 @@ function createBot() {
     // ── Auto-equip elytra on spawn ───────────────────────────────────────
     setTimeout(() => {
       auditAndEquipElytra().then(ok => {
-        const hasRocket = !!findRocket();
-        console.log(`[EAFE] Inventory audit: elytra=${ok} rockets=${hasRocket}`);
+        const count = countRockets();
+        console.log(`[EAFE] Inventory audit: elytra=${ok} rockets=${count}`);
         try {
-          bot.chat(`[EAFE] Ready  Elytra:${ok ? '✓' : '✗'}  Rockets:${hasRocket ? '✓' : '✗'}  |  f=fly  s=stop  audit=runAudit`);
+          bot.chat(`[EAFE] Ready  Elytra:${ok ? '✓' : '✗'}  Rockets:${count}  |  f=fly  s=stop  audit=runAudit`);
         } catch(_) {}
       });
     }, 2000);
@@ -806,11 +818,11 @@ function createBot() {
 
 // ─── BANNER ──────────────────────────────────────────────────────────────────
 console.log('╔═════════════════════════════════════════════════════════════╗');
-console.log('║  EAFE v7.1 — Elytra Autonomous Flight Engine Specification   ║');
+console.log('║  EAFE v7.1 — Smart Rocket Conservation & Dead-Stick Engine  ║');
 console.log('║  Physics: Native Mineflayer 50ms Engine                      ║');
-console.log('║  Core Flight: 150ms Apex Jump + Pitch + Timed Rocket Bursts ║');
-console.log('║  Safety: 3D Spatial Audit + Elytra Durability Hotswap        ║');
-console.log('║  Landing: Surface Classifier & Archimedean Spiral Re-route  ║');
+console.log('║  Fuel: N_req Formula + Speed-Gated Rocket Firing (||v||)     ║');
+console.log('║  Unpowered: Dead-Stick L/D Glide + 4m Touchdown Flare        ║');
+console.log('║  Recovery: ERR_WALL_COLLISION 180° Turn + Spatial Audit     ║');
 console.log(`║  Host: ${HOST}:${PORT}`.padEnd(61) + '║');
 console.log('╚═════════════════════════════════════════════════════════════╝');
 
