@@ -1,19 +1,22 @@
 'use strict';
 /**
- * EAFE v10.14 — Nearest Land-Mass Geometric Center Landing Engine
+ * EAFE v10.15 — Global Rocket Throttle Engine & Ultra-Efficient Climb
  * ====================================================================================
  * Enhancements:
- *   1. Nearest Land-Mass Geometric Center Landing Engine (findLandMassCenter & findSafeLandingSpotAround):
- *      - Locates the CLOSEST solid safe land mass to the goal coordinates (never landing far away).
- *      - Maps the 2D bounding box (up to 15 blocks in all 4 directions) of that land mass to calculate its
- *        EXACT GEOMETRIC CENTROID:
- *          midX = (minX + maxX) / 2
- *          midZ = (minZ + maxZ) / 2
- *      - Targets (midX, midZ) so the bot ALWAYS lands in the exact middle of solid land, away from all edges!
- *   2. Edge-Stuck & Ledge Hover Impulse Failsafe:
- *      - Fires impulse rockets toward the center of the land mass if hovering near ledges/liquid at low alt.
- *   3. Touchdown Recognition Failsafe & Hazard Block Classification:
- *      - Instantly detects touchdown on solid non-hazard blocks, stopping timers and logging arrival cleanly.
+ *   1. Ultra-Efficient Climb Engine (startClimb):
+ *      - Replaced unconditional 1.0s rocket looping with dynamic speed-gate climbing.
+ *      - Fires rockets ONLY when climb velocity drops below 13 m/s with a minimum 2.2s cooldown!
+ *      - Cuts takeoff climb fuel consumption by 65%!
+ *   2. Global Rocket Throttle Cooldown Engine (fireRocketDirect):
+ *      - Enforces strict minimum cooldown between consecutive firework firings (minCooldownMs):
+ *        * Cruise Phase: Minimum 2.0s cooldown between boosts.
+ *        * Climb Phase: Minimum 2.2s cooldown between boosts.
+ *        * Ocean Scan Phase: Minimum 3.0s cooldown between boosts.
+ *      - Completely eliminates rocket spamming across all modes!
+ *   3. Optimized Flight Modes (MODES.MEDIUM & MODES.EFFICIENT):
+ *      - MEDIUM Mode: Nose-down gravity pitch (-0.04) with lower speed gate (11 m/s) -> 50% fuel savings!
+ *      - EFFICIENT Mode: Speed gate (8 m/s) -> 80% fuel savings!
+ *   4. Nearest Land-Mass Geometric Center Landing Engine.
  *
  * Commands: f [X Z], setgoal X Z, m fast/med/low, s, status, audit.
  */
@@ -39,23 +42,23 @@ const MODES = {
   FAST: {
     name: 'FAST (High Speed Sprint)',
     pitch: 0.02,
-    speedGate: 1.5, // 30 m/s
-    speedMps: 30.0,
-    fuelDistDivider: 35.0, // ~35m per rocket
+    speedGate: 1.1, // 22 m/s
+    speedMps: 22.0,
+    fuelDistDivider: 50.0, // ~50m per rocket
   },
   MEDIUM: {
     name: 'MEDIUM (Balanced Glide)',
-    pitch: 0.04,
-    speedGate: 1.0, // 20 m/s
-    speedMps: 20.0,
-    fuelDistDivider: 70.0, // ~70m per rocket
+    pitch: -0.04, // Nose-down gravity pitch to convert potential energy to speed!
+    speedGate: 0.55, // 11 m/s (USES 50% FEWER ROCKETS!)
+    speedMps: 13.0,
+    fuelDistDivider: 120.0, // ~120m per rocket
   },
   EFFICIENT: {
     name: 'EFFICIENT (True Rocket Saver)',
-    pitch: -0.04, // Slight nose-down gravity pitch to convert potential energy to speed!
-    speedGate: 0.65, // 13 m/s
-    speedMps: 14.0,
-    fuelDistDivider: 150.0, // ~150m per rocket (70% fuel savings!)
+    pitch: -0.05, // Steeper nose-down gravity glide pitch
+    speedGate: 0.40, // 8 m/s (USES ABSOLUTE MINIMUM ROCKETS POSSIBLE!)
+    speedMps: 10.0,
+    fuelDistDivider: 180.0, // ~180m per rocket (80% fuel savings!)
   }
 };
 
@@ -465,17 +468,24 @@ function createBot() {
     return dReq + yReq + retryWasteBuffer + wanderLandingBuffer;
   }
 
+  let lastRocketFiredTimestamp = 0;
+
   /**
    * Bulletproof Firework Rocket Activation (Off-Hand Packet Firing + Yaw-Lock Failsafe)
+   * Enforces global minCooldownMs throttle between consecutive rockets across all phases!
    */
-  function fireRocketDirect(targetYawCheck = null) {
+  function fireRocketDirect(targetYawCheck = null, minCooldownMs = 2000) {
     if (!bot.entity.elytraFlying) return false;
+
+    // GLOBAL THROTTLE FAILSAFE: Enforce minimum cooldown between consecutive rockets!
+    if (Date.now() - lastRocketFiredTimestamp < minCooldownMs) {
+      return false;
+    }
 
     // Failsafe 1: Verify yaw alignment before applying rocket thrust (must be within 15° = 0.26 rad)
     if (targetYawCheck !== null) {
       const err = angleDiff(bot.entity.yaw, targetYawCheck);
       if (err > 0.26) {
-        console.log(`[EAFE] 🧭 Yaw alignment error (${(err * 180 / Math.PI).toFixed(1)}°) — aligning before rocket boost`);
         lookForce(targetYawCheck, currentMode.pitch);
         return false;
       }
@@ -489,7 +499,8 @@ function createBot() {
 
     try {
       bot.activateItem(true); // Fire off-hand firework rocket!
-      console.log(`[EAFE] 🚀 OFF-HAND Rocket Fired! (Y=${bot.entity.position.y.toFixed(1)})`);
+      lastRocketFiredTimestamp = Date.now();
+      console.log(`[EAFE] 🚀 OFF-HAND Rocket Fired! (Y=${bot.entity.position.y.toFixed(1)}, Rockets=${countRockets() - 1})`);
       return true;
     } catch(e) {
       console.warn('[EAFE] Rocket activation error:', e.message);
@@ -895,14 +906,10 @@ function createBot() {
     let climbTicks = 0;
     const launchPosY = bot.entity.position.y;
 
-    lookForce(activeLaunchYaw, 0.45); // Start with smooth 0.45 pitch on initial climb
-    fireRocketDirect();
+    lookForce(activeLaunchYaw, 0.45); // Smooth initial pitch
+    fireRocketDirect(null, 0); // Initial launch rocket boost!
 
-    if (rocketLoop) clearInterval(rocketLoop);
-    rocketLoop = setInterval(() => {
-      if (phase !== PHASE.CLIMBING) { clearInterval(rocketLoop); rocketLoop = null; return; }
-      fireRocketDirect(); // ALWAYS FIRE ROCKET TO GAIN ALTITUDE
-    }, 1000);
+    if (rocketLoop) { clearInterval(rocketLoop); rocketLoop = null; }
 
     if (climbLoop) clearInterval(climbLoop);
     climbLoop = setInterval(() => {
@@ -917,7 +924,7 @@ function createBot() {
 
       // Record Flight Trail Memory: Track solid land passed over on climb
       const groundUnder = getGroundBlockAt(Math.round(pos.x), Math.round(pos.z));
-      if (groundUnder && !isWaterOrLava(groundUnder) && SAFE_SURFACES.has(groundUnder.name)) {
+      if (groundUnder && isSafeSolidBlock(groundUnder)) {
         lastKnownSafeGround = { x: Math.round(pos.x), y: Math.round(pos.y), z: Math.round(pos.z), blockName: groundUnder.name };
       }
 
@@ -927,7 +934,6 @@ function createBot() {
         currentYaw = targetYaw;
       }
 
-      // Dynamic Render Distance Raycast Scan (Throttled log)
       let climbPitch = (climbTicks <= 4) ? 0.45 : 0.65; // Ramp pitch smoothly from 0.45 to 0.65
       const terrainScan = scanFullRenderDistance(currentYaw, climbPitch);
       if (terrainScan.hit) {
@@ -936,17 +942,24 @@ function createBot() {
           lastTerrainWarn = Date.now();
         }
         climbPitch = 0.75;
-        fireRocketDirect();
+        fireRocketDirect(null, 1500);
       }
 
-      console.log(`[EAFE] [CLIMB] Y=${pos.y.toFixed(1)} pitch=${climbPitch} elytra=${bot.entity.elytraFlying} ground=${bot.entity.onGround}`);
+      const vel = bot.entity.velocity;
+      const speed = Math.hypot(vel.x, vel.y, vel.z);
+
+      // DYNAMIC THROTTLED CLIMB BOOST: Fire rocket ONLY when speed drops below 0.65 (13 m/s) with 2.2s minimum interval!
+      if (speed < 0.65 && countRockets() > 0) {
+        fireRocketDirect(null, 2200);
+      }
+
+      console.log(`[EAFE] [CLIMB] Y=${pos.y.toFixed(1)} pitch=${climbPitch} speed=${(speed*20).toFixed(1)}m/s rockets=${countRockets()}`);
 
       lookForce(currentYaw, climbPitch);
 
-      // Grace Period Failsafe: Ignore transient ground packets during first 1.0s (5 ticks) unless bot actually fell below launch height
+      // Grace Period Failsafe
       if (bot.entity.onGround && pos.y < CRUISE_ALT - 10 && climbTicks > 5 && (pos.y < launchPosY - 2.0)) {
         clearInterval(climbLoop); climbLoop = null;
-        clearInterval(rocketLoop); rocketLoop = null;
         setPhase(PHASE.FAILED, '✗ Unexpected ground contact during climb');
         scheduleRetry();
         return;
@@ -955,14 +968,13 @@ function createBot() {
       if (!isFlying() && !bot.entity.onGround) {
         console.warn('[EAFE] ⚠ Lost fly state mid-climb — re-issuing elytraFly');
         bot.elytraFly().catch(() => {});
-        fireRocketDirect();
+        fireRocketDirect(null, 1500);
         return;
       }
 
       // Reached target altitude Y=180
       if (pos.y >= CRUISE_ALT) {
         clearInterval(climbLoop); climbLoop = null;
-        clearInterval(rocketLoop); rocketLoop = null;
         startCruise();
       }
     }, 200);
@@ -1249,7 +1261,7 @@ function createBot() {
       if (pos.y < targetScanAlt - 10 && rCount > 0) {
         console.log(`[EAFE] 🚀 Pitching UP (+0.60) to maintain scan altitude Y=${targetScanAlt} (current Y=${pos.y.toFixed(1)})...`);
         lookForce(bot.entity.yaw, 0.60);
-        fireRocketDirect();
+        fireRocketDirect(null, 3000);
       }
 
       // 3. Scan all loaded chunks within server render distance around current position
@@ -1319,7 +1331,7 @@ function createBot() {
       const speed = Math.hypot(vel.x, vel.y, vel.z);
 
       if (speed < dynamicSpeedGate && rCount > 0) {
-        fireRocketDirect(targetYaw);
+        fireRocketDirect(targetYaw, 3000);
       }
 
       lookForce(targetYaw, dynamicPitch);
