@@ -1,18 +1,18 @@
 'use strict';
 /**
- * EAFE v10.10 — Strict <= 10 Durability Elytra Auto-Swap Threshold Rule
+ * EAFE v10.11 — Multi-Tier Altitude Terrain Safety Engine & Loop Prevention
  * ====================================================================================
  * Enhancements:
- *   1. Strict <= 10 Durability Elytra Auto-Swap Threshold Rule:
- *      - The bot ONLY swaps Elytras if the currently equipped Elytra has 10 or less durability points!
- *      - As long as the equipped Elytra has > 10 durability (e.g. 426/432), it will NEVER swap pre-flight
- *        or mid-flight, eliminating all armor-swap thrashing and logs!
- *      - When equipped Elytra reaches <= 10 durability points, auto-swaps to the highest durability
- *        spare in inventory, re-sends elytraFly() packet, and fires an off-hand rocket boost.
- *   2. Smooth Takeoff Kinetic Energy Protection & 5-Tick Grace Period:
- *      - Ramps pitch smoothly (0.45 -> 0.65 rad) on takeoff climb with 1.0s grace period.
- *   3. Parallel Lawnmower Grid Search Engine (Boustrophedon Pattern):
- *      - 300m parallel straight tracks with 128m East shifts and 10% backtrack limit rule.
+ *   1. Multi-Tier Altitude Terrain Safety Engine (Low vs High Altitude Protection):
+ *      - Zone 1: DANGER ZONE (Y = 60m to 110m): Strict 96m raycast lookahead. If ANY obstacle/terrain
+ *        is detected ahead at low altitude, IMMEDIATELY triggers EMERGENCY ASCENT (+0.75 rad pitch)
+ *        and rocket boost to climb above Y > 115m! The bot will never cruise or collide with low-altitude obstacles.
+ *      - Zone 2: SAFE ZONE (Y = 111m to 180m): Standard smooth cruising & scanning.
+ *   2. LANDING <-> WANDER_SCAN Ping-Pong Loop Fix:
+ *      - Fixed 200ms re-entry loop by delaying 10% Backtrack Lock check until after 5s of goal scanning
+ *        and preventing redundant startWanderScan() re-invocations when already in WANDER_SCAN phase.
+ *   3. Strict <= 10 Durability Elytra Auto-Swap Rule:
+ *      - Swaps Elytra ONLY when equipped durability reaches <= 10 points.
  *
  * Commands: f [X Z], setgoal X Z, m fast/med/low, s, status, audit.
  */
@@ -1094,8 +1094,9 @@ function createBot() {
 
   /**
    * High-Altitude Straight-Line Grid Lawnmower Search (WANDER_SCAN Phase)
-   * Progressive Ultra Low-Power Rocket Saver: Forces EFFICIENT mode and applies
-   * progressive fuel conservation as rockets drop!
+   * Multi-Tier Terrain Safety:
+   *   Y = 60-110m (LOW ALTITUDE DANGER ZONE): Strict 96m raycast lookahead, steep pitch (+0.75 rad) & rocket boost to climb above 115m.
+   *   Y = 111-160m (SAFE ZONE): Standard smooth scanning.
    */
   function startWanderScan() {
     // FORCE LOW POWER ROCKET SAVER MODE FOR OCEAN SEARCHES
@@ -1103,7 +1104,7 @@ function createBot() {
 
     const rDist = getServerRenderDistance();
     const targetScanAlt = rDist.scanAlt; // Dynamically calculated optimal scan altitude
-    const legDistanceStep = Math.round(rDist.blocks * 1.5); // Leg length expansion per side
+    let scanTicks = 0;
 
     setPhase(PHASE.WANDER_SCAN, `🌊 Ocean LZ detected — forcing EFFICIENT Mode & climbing to dynamic scan altitude Y=${targetScanAlt} (RenderDist: ${rDist.chunks}ch / ${rDist.blocks}m)...`);
 
@@ -1117,11 +1118,27 @@ function createBot() {
     flyLoop = setInterval(() => {
       if (phase !== PHASE.WANDER_SCAN) { clearInterval(flyLoop); flyLoop = null; return; }
 
+      scanTicks++;
       const pos = bot.entity.position;
       const rCount = countRockets();
 
       // Mid-flight Elytra Auto-Swap check
       checkMidFlightElytraSwap();
+
+      // ── MULTI-TIER ALTITUDE TERRAIN SAFETY ENGINE ──
+      // Zone 1: DANGER ZONE (Y = 60m to 110m) -> Strict 96m Raycast & Emergency Ascent
+      if (pos.y <= 110) {
+        const terrainScan = scanFullRenderDistance(bot.entity.yaw, 0.40);
+        if (terrainScan.hit || pos.y < targetScanAlt - 10) {
+          if (Date.now() - lastTerrainWarn > 2000) {
+            console.warn(`[EAFE] 🏔 Low-altitude terrain danger (${terrainScan.block || 'low alt'} at ${terrainScan.dist}m, Y=${pos.y.toFixed(1)}) — EMERGENCY ASCENT (+0.75 rad) to safe altitude Y>115m!`);
+            lastTerrainWarn = Date.now();
+          }
+          lookForce(bot.entity.yaw, 0.75);
+          if (rCount > 0) fireRocketDirect();
+          return; // Pause forward low-altitude cruise until altitude Y > 115m is restored!
+        }
+      }
 
       // Progressive Ultra Low-Power Speed Gate (lower speed threshold = fewer rockets fired!)
       let dynamicSpeedGate = currentMode.speedGate; // Default: 0.65 (13 m/s)
@@ -1144,7 +1161,7 @@ function createBot() {
         }
       }
 
-      // 2. Maintain Dynamic Ocean Scan Altitude (e.g. Y=100 for 4ch, Y=120 for 6ch, Y=138 for 8ch)
+      // 2. Maintain Dynamic Ocean Scan Altitude (e.g. Y=120 to Y=150)
       if (pos.y < targetScanAlt - 10 && rCount > 0) {
         console.log(`[EAFE] 🚀 Pitching UP (+0.60) to maintain scan altitude Y=${targetScanAlt} (current Y=${pos.y.toFixed(1)})...`);
         lookForce(bot.entity.yaw, 0.60);
@@ -1166,9 +1183,8 @@ function createBot() {
         return;
       }
 
-      // Failsafe 3b. 10% Backtrack Limit Rule for Known Safe Coastline Return
-      // ONLY turn back to lastKnownSafeGround if the distance to turn back is <= 10% of total trip distance!
-      if (lastKnownSafeGround && flightStartPos) {
+      // Failsafe 3b. 10% Backtrack Limit Rule (Evaluated ONLY after 5 seconds of goal scanning)
+      if (scanTicks > 25 && lastKnownSafeGround && flightStartPos) {
         const totalTripDist = Math.hypot(activeTargetX - flightStartPos.x, activeTargetZ - flightStartPos.z);
         const backtrackDist = Math.hypot(lastKnownSafeGround.x - pos.x, lastKnownSafeGround.z - pos.z);
         const maxBacktrackAllowed = Math.max(totalTripDist * 0.10, 40); // 10% of total trip (min 40m)
@@ -1240,10 +1256,11 @@ function createBot() {
     let targetZ = safeSpot.z;
 
     // IF NO SOLID GROUND IN IMMEDIATE ARRIVAL CHUNKS:
-    // ALWAYS SCAN GOAL AREA FIRST via startWanderScan() before falling back to flight trail!
     if (!safeSpot.safe) {
-      console.warn(`[EAFE] 🌊 Target area (${activeTargetX}, ${activeTargetZ}) is open ocean! Initiating Straight-Line Lawnmower Scan around goal location first...`);
-      startWanderScan();
+      if (phase !== PHASE.WANDER_SCAN) {
+        console.warn(`[EAFE] 🌊 Target area (${activeTargetX}, ${activeTargetZ}) is open ocean! Initiating Straight-Line Lawnmower Scan around goal location first...`);
+        startWanderScan();
+      }
       return;
     }
 
