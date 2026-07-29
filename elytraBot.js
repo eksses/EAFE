@@ -1,18 +1,17 @@
 'use strict';
 /**
- * EAFE v10.5 — Goal-First Lawnmower Ocean Scan & Remaining Rocket Reporting
+ * EAFE v10.6 — 10% Backtrack Limit Rule & Goal-First Ocean Search
  * ====================================================================================
  * Enhancements:
- *   1. Goal-Location First Ocean Search (startWanderScan):
- *      - Upon arriving at destination (X, Z), if LZ is open ocean, the bot ALWAYS executes
- *        a straight-line grid lawnmower search around the GOAL LOCATION FIRST to locate
- *        islands, shores, or land near the target!
- *      - Does NOT turn back to base automatically.
- *   2. Emergency Low-Fuel Coastline Fallback:
- *      - Flight-trail memory (lastKnownSafeGround) is used ONLY as a true emergency fallback
- *        if 40+ chunks around goal have been searched and remaining rockets drop to <= 6 (<= 15%).
+ *   1. 10% Backtrack Limit Rule for Safe Coastline Fallback:
+ *      - The bot ONLY turns back to a known safe coastline (lastKnownSafeGround) if the distance
+ *        to turn back is <= 10% of the total flight distance (e.g. <= 50m for a 500m trip)!
+ *      - If the nearest safe coast is farther than 10% (e.g. back at launchpad base 467m away),
+ *        the bot REJECTS backtracking and CONTINUES WANDER & SCAN around the goal location!
+ *   2. Goal-Location First Ocean Search (startWanderScan):
+ *      - Executes a straight-line grid lawnmower search around the GOAL LOCATION FIRST.
  *   3. Remaining Firework Rocket Count in Arrival Announcement:
- *      - Arrival message now displays remaining fireworks:
+ *      - Arrival message reports remaining fireworks:
  *        "✅ Destination Reached! Arrived safely at (...) | Rockets remaining: 45/51"
  *   4. Dynamic Unbreaking-Aware Elytra Health & Mid-Flight Auto-Swap:
  *      - Audits Unbreaking 1-3 damage rates (25%-50%), sums durability across all inventory Elytras,
@@ -136,6 +135,7 @@ function createBot() {
 
   // Flight Trail Memory: Records last known solid safe land surface passed over
   let lastKnownSafeGround = null;
+  let flightStartPos      = null;
 
   // Straight-line grid lawn-mower search state
   let gridDirIndex        = 0;            // 0=North, 1=East, 2=South, 3=West
@@ -710,6 +710,9 @@ function createBot() {
       return;
     }
 
+    flightStartPos = bot.entity.position.clone();
+    lastKnownSafeGround = null;
+
     const rDist = getServerRenderDistance();
     setPhase(PHASE.AUDIT, `Running pre-flight inventory, fuel & spatial audit [Mode:${currentMode.name} RenderDist:${rDist.chunks}ch/${rDist.blocks}m] to (${activeTargetX}, ${activeTargetZ})...`);
 
@@ -1161,18 +1164,25 @@ function createBot() {
         return;
       }
 
-      // Failsafe 3b. Emergency Low-Fuel Return to flight-trail coastline if goal search exhausted
-      if (rCount <= 6 && scannedChunks.size >= 40 && lastKnownSafeGround) {
-        clearInterval(flyLoop); flyLoop = null;
-        console.warn(`[EAFE] ⚠ Low fuel emergency (${rCount} rockets left, ${scannedChunks.size} chunks scanned) — re-routing to last known coastline at (${lastKnownSafeGround.x}, ${lastKnownSafeGround.z})!`);
-        try {
-          bot.chat(`[EAFE] ⚠ Low fuel (${rCount} rockets left)! Returning to last known safe coast at (${lastKnownSafeGround.x}, ${lastKnownSafeGround.z}) on ${lastKnownSafeGround.blockName}!`);
-        } catch(_) {}
+      // Failsafe 3b. 10% Backtrack Limit Rule for Known Safe Coastline Return
+      // ONLY turn back to lastKnownSafeGround if the distance to turn back is <= 10% of total trip distance!
+      if (lastKnownSafeGround && flightStartPos) {
+        const totalTripDist = Math.hypot(activeTargetX - flightStartPos.x, activeTargetZ - flightStartPos.z);
+        const backtrackDist = Math.hypot(lastKnownSafeGround.x - pos.x, lastKnownSafeGround.z - pos.z);
+        const maxBacktrackAllowed = Math.max(totalTripDist * 0.10, 40); // 10% of total trip (min 40m)
 
-        activeTargetX = lastKnownSafeGround.x;
-        activeTargetZ = lastKnownSafeGround.z;
-        startLanding();
-        return;
+        if (backtrackDist <= maxBacktrackAllowed) {
+          clearInterval(flyLoop); flyLoop = null;
+          console.warn(`[EAFE] 🏝 10% Backtrack Lock: Safe coastline found ${backtrackDist.toFixed(0)}m away (<= 10% of ${totalTripDist.toFixed(0)}m trip)! Re-routing to (${lastKnownSafeGround.x}, ${lastKnownSafeGround.z})...`);
+          try {
+            bot.chat(`[EAFE] 🏝 Safe coast found within 10% backtrack (${backtrackDist.toFixed(0)}m)! Landing at (${lastKnownSafeGround.x}, ${lastKnownSafeGround.z}) on ${lastKnownSafeGround.blockName}!`);
+          } catch(_) {}
+
+          activeTargetX = lastKnownSafeGround.x;
+          activeTargetZ = lastKnownSafeGround.z;
+          startLanding();
+          return;
+        }
       }
 
       // 4. Straight-Line Grid Navigation (Cardinal Legs)
