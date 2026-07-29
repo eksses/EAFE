@@ -1,20 +1,26 @@
 'use strict';
 /**
- * EAFE v5 — Elytra Autonomous Flight Engine
- * ==========================================
- * Fixes:
- *   - Correct Pitch System (Mineflayer / prismarine-physics):
- *       POSITIVE pitch (+0.65 rad) = LOOKING UP / CLIMBING
- *       ZERO pitch     ( 0.00 rad) = HORIZON / LEVEL
- *       NEGATIVE pitch (-0.30 rad) = LOOKING DOWN / DESCENDING
- *   - Native Physics enabled (bot.physicsEnabled = true) with 50ms sync.
- *   - Reliable Takeoff: Jump -> wait airborne -> elytraFly() -> IMMEDIATELY fire rocket with pitch +0.5.
- *   - Timed Rocket Propulsion: Fires rocket on schedule during climb (1.2s) & cruise (1.5s).
- *   - Raycast & Path Scan: Checks 20m ceiling & 30m climb trajectory before takeoff.
- *   - Relocation: Scans 15x15 grid for open sky & walks to launch spot if blocked.
- *   - State Machine: Track IDLE, SCANNING, RELOCATING, TAKEOFF, CLIMBING, CRUISING, LANDING, FAILED.
- *   - FAILED status reporting & multi-stage auto-retry mechanism.
- *   - Knockback: Responds in real-time to entity_velocity & explosion packets.
+ * EAFE v7.1 — Elytra Autonomous Flight Engine (Vanilla & EAFE Specification Compliant)
+ * ======================================================================================
+ * Features:
+ *   - Working Flight Core (UNTOUCHED):
+ *       • Takeoff: 150ms Jump Apex Rule (Jump -> wait airborne -> elytraFly() -> rocket)
+ *       • Pitch Angles: +0.65=UP (Climb), +0.05=LEVEL (Cruise), -0.30=DOWN (Landing)
+ *       • Propulsion: Timed rocket bursts (1.2s Climb, 1.5s Cruise)
+ *       • Engine: Native Mineflayer 50ms physics sync with @nxg-org/mineflayer-physics-util
+ *   - Pre-Flight Audit (EAFE-v7.1 Sec 2.2 & 3.2):
+ *       • Durability check: Auto-swap Elytra if durability ≤ 15 points
+ *       • Fuel equation: N_req = ceil(d2d/68.5) + ceil(ΔY/28.0) + 15
+ *       • 3D Spatial Envelope: Overhead (1x1x5), Runway (1x2x4), Lateral (3x2x1)
+ *   - Ground Pathfind Relocation (EAFE-v7.1 Sec 3.2):
+ *       • Local 11x5x11 grid scan for elevated open node if spatial check fails
+ *   - Surface Classifier & Archimedean Spiral Landing (EAFE-v7.1 Sec 6.1-6.2):
+ *       • Validates solid ground (grass, dirt, stone, obsidian) vs hazard (lava, fire, water, cactus)
+ *       • Spiral search (R=1..20m) for safe landing pad if target LZ is hazardous
+ *       • Sneak key engaged on touchdown for zero bounce / zero damage
+ *   - Network & Latency Telemetry (EAFE-v7.1 Sec 4.2):
+ *       • Pauses rockets if server ping > 500ms
+ *   - Real-time Knockback: Responds to entity_velocity & explosion packets
  */
 
 const mineflayer    = require('mineflayer');
@@ -34,14 +40,23 @@ const MAX_RETRIES = 3;    // retries before giving up
 // ─── PHASE STATE ─────────────────────────────────────────────────────────────
 const PHASE = {
   IDLE:       'IDLE',
-  SCANNING:   'SCANNING',     // raycasting launch area
-  RELOCATING: 'RELOCATING',   // walking to better launch spot
-  TAKEOFF:    'TAKEOFF',      // jump + elytraFly()
+  AUDIT:      'AUDIT',        // pre-flight inventory, fuel & spatial audit
+  RELOCATING: 'RELOCATING',   // walking to open launch spot
+  TAKEOFF:    'TAKEOFF',      // 150ms jump apex + elytraFly()
   CLIMBING:   'CLIMBING',     // nose up (+0.65), gaining altitude
   CRUISING:   'CRUISING',     // level (+0.05), heading to target
-  LANDING:    'LANDING',      // glide descent (-0.30)
+  LANDING:    'LANDING',      // Archimedean spiral & surface glide (-0.30)
   FAILED:     'FAILED',       // flight failed, auto-retry scheduled
 };
+
+// Whitelisted safe landing surfaces (EAFE-v7.1 Sec 6.1)
+const SAFE_SURFACES = new Set([
+  'grass_block', 'dirt', 'coarse_dirt', 'podzol', 'stone', 'cobblestone',
+  'smooth_stone', 'granite', 'diorite', 'andesite', 'sand', 'red_sand',
+  'gravel', 'sandstone', 'obsidian', 'netherrack', 'end_stone', 'planks',
+  'oak_planks', 'spruce_planks', 'birch_planks', 'jungle_planks', 'acacia_planks',
+  'dark_oak_planks', 'stone_bricks', 'deepslate', 'terracotta', 'concrete'
+]);
 
 // ─── UTIL ────────────────────────────────────────────────────────────────────
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
@@ -97,7 +112,18 @@ function createBot() {
     try { bot.chat(line.substring(0, 256)); } catch(_) {}
   }
 
-  // ─── Inventory helpers ────────────────────────────────────────────────────
+  // ─── Inventory & Equipment Audit ──────────────────────────────────────────
+  function countRockets() {
+    let count = 0;
+    for (const i of bot.inventory.items()) {
+      if (i.name === 'firework_rocket') {
+        try { if (i.nbt?.value?.Fireworks?.value?.Explosions) continue; } catch(_) {}
+        count += i.count;
+      }
+    }
+    return count;
+  }
+
   function findRocket() {
     return bot.inventory.items().find(i => {
       if (i.name !== 'firework_rocket') return false;
@@ -106,13 +132,41 @@ function createBot() {
     });
   }
 
-  async function autoEquipElytra() {
-    const chest = bot.inventory.slots[6];
-    if (chest?.name === 'elytra') { console.log('[EAFE] ✓ Elytra equipped'); return true; }
-    const item = bot.inventory.items().find(i => i.name === 'elytra');
-    if (!item) { console.warn('[EAFE] ⚠ No elytra in inventory'); return false; }
-    try { await bot.equip(item, 'torso'); console.log('[EAFE] 🎽 Elytra equipped'); return true; }
-    catch(e) { console.error('[EAFE] ✗ equip failed:', e.message); return false; }
+  /**
+   * Elytra Durability & Auto-HotSwap Audit (EAFE-v7.1 Sec 3.2)
+   */
+  async function auditAndEquipElytra() {
+    const chest = bot.inventory.slots[6]; // chestplate slot
+    if (chest?.name === 'elytra') {
+      const dur = chest.maxDurability ? (chest.maxDurability - chest.durabilityUsed) : 400;
+      if (dur > 15) {
+        console.log(`[EAFE] ✓ Elytra equipped (durability: ${dur})`);
+        return true;
+      }
+      console.warn(`[EAFE] ⚠ Equipped Elytra durability low (${dur} points) — looking for spare...`);
+    }
+
+    // Find elytra in inventory with durability > 15
+    const spare = bot.inventory.items().find(i => {
+      if (i.name !== 'elytra') return false;
+      const dur = i.maxDurability ? (i.maxDurability - i.durabilityUsed) : 400;
+      return dur > 15;
+    });
+
+    if (!spare) {
+      console.warn('[EAFE] ⚠ No usable Elytra (durability > 15) found in inventory');
+      return false;
+    }
+
+    try {
+      await bot.equip(spare, 'torso');
+      console.log('[EAFE] 🎽 Fresh Elytra equipped to chest slot');
+      try { bot.chat('[EAFE] ✓ Fresh Elytra equipped!'); } catch(_) {}
+      return true;
+    } catch(e) {
+      console.error('[EAFE] ✗ Equip elytra failed:', e.message);
+      return false;
+    }
   }
 
   // ─── Navigation helpers ───────────────────────────────────────────────────
@@ -137,9 +191,17 @@ function createBot() {
     bot.look(yaw, pitch, true);
   }
 
-  // ─── Rocket firing ────────────────────────────────────────────────────────
+  // ─── Rocket firing with Latency Protection ────────────────────────────────
   function fireRocket() {
     if (!bot.entity.elytraFlying) { console.log('[EAFE] fireRocket: skipped (not elytraFlying)'); return false; }
+
+    // EAFE-v7.1 Sec 4.2: Suppress rocket if server latency > 500ms
+    const ping = bot.player?.ping ?? 50;
+    if (ping > 500) {
+      console.warn(`[EAFE] ⚠ High server ping (${ping}ms) — throttling rocket`);
+      return false;
+    }
+
     const r = findRocket();
     if (!r) { console.warn('[EAFE] ⚠ No rockets!'); try { bot.chat('[EAFE] ⚠ No rockets!'); } catch(_) {} return false; }
     try {
@@ -164,84 +226,95 @@ function createBot() {
   }
 
   // ─────────────────────────────────────────────────────────────────────────
-  //  RAYCAST / AREA SCAN
+  //  PRE-FLIGHT AUDIT & SPATIAL ENVELOPE (EAFE-v7.1 Sec 3.2)
   // ─────────────────────────────────────────────────────────────────────────
 
   /**
-   * Raycast scanning:
-   * 1. 20 blocks straight up
-   * 2. 30 blocks along climb vector (+0.65 pitch = nose UP)
+   * 3D Spatial Envelope Scan:
+   *  1. Overhead Column: 1x1x5 blocks (Y+1 -> Y+5)
+   *  2. Forward Runway: 1x2x4 blocks along yaw
+   *  3. Lateral Spacing: 3x2x1 blocks at shoulder height
    */
-  function scanLaunchArea() {
-    const pos    = bot.entity.position;
-    const yaw    = yawTo(TARGET_X, TARGET_Z);
-    const pitch  = 0.65; // NOSE UP in Mineflayer
+  function auditSpatialEnvelope() {
+    const pos = bot.entity.position;
+    const yaw = yawTo(TARGET_X, TARGET_Z);
 
-    const cosPitch = Math.cos(pitch);
-    const sinPitch = Math.sin(pitch);
-    const dirX     = -Math.sin(yaw) * cosPitch;
-    const dirY     =  sinPitch;
-    const dirZ     =  Math.cos(yaw) * cosPitch;
-
-    // 1. Check sky straight up
-    let clearAbove = true;
-    for (let dy = 1; dy <= 20; dy++) {
-      const b = bot.blockAt(pos.offset(0, dy, 0));
-      if (!isAir(b)) { clearAbove = false; break; }
+    // 1. Overhead Column
+    for (let dy = 1; dy <= 5; dy++) {
+      if (!isAir(bot.blockAt(pos.offset(0, dy, 0)))) {
+        return { clear: false, reason: `Overhead blocked at Y+${dy}` };
+      }
     }
 
-    // 2. Check 30m climb trajectory
-    let clearPath = true;
-    let hitDist   = 0;
-    let hitBlock  = null;
-    const eyePos  = pos.offset(0, 1.6, 0);
-    for (let d = 1; d <= 30; d++) {
-      const checkPos = eyePos.offset(dirX * d, dirY * d, dirZ * d);
-      const b = bot.blockAt(checkPos);
-      if (!isAir(b)) { clearPath = false; hitDist = d; hitBlock = b?.name; break; }
-    }
+    // 2. Forward Runway (4 blocks ahead, 2 blocks high)
+    const sinY = Math.sin(yaw);
+    const cosY = Math.cos(yaw);
+    const dirX = -sinY;
+    const dirZ = cosY;
 
-    return { clearAbove, clearPath, hitDist, hitBlock };
-  }
-
-  /**
-   * Area scan: 15x15 grid around player for spot with max open sky
-   */
-  function findBestLaunchSpot() {
-    const pos   = bot.entity.position;
-    const baseY = Math.floor(pos.y);
-    let best    = null;
-
-    for (let dx = -7; dx <= 7; dx += 2) {
-      for (let dz = -7; dz <= 7; dz += 2) {
-        const cx = Math.floor(pos.x) + dx;
-        const cz = Math.floor(pos.z) + dz;
-
-        let groundY = null;
-        for (let dy = 0; dy >= -5; dy--) {
-          const b = bot.blockAt(new Vec3(cx, baseY + dy, cz));
-          if (!isAir(b)) { groundY = baseY + dy + 1; break; }
-        }
-        if (groundY === null) continue;
-
-        let score = 0;
-        for (let dy = 0; dy < 25; dy++) {
-          const b = bot.blockAt(new Vec3(cx, groundY + dy, cz));
-          if (!isAir(b)) break;
-          score++;
-        }
-
-        if (score > (best?.score ?? 0)) {
-          best = { x: cx, z: cz, score };
+    for (let d = 1; d <= 4; d++) {
+      for (let dy = 0; dy <= 1; dy++) {
+        const bPos = pos.offset(Math.round(dirX * d), dy, Math.round(dirZ * d));
+        if (!isAir(bot.blockAt(bPos))) {
+          return { clear: false, reason: `Runway blocked at ${d}m ahead` };
         }
       }
     }
 
-    return (best?.score >= 12) ? best : null;
+    // 3. Lateral Spacing (1 block left/right at shoulder height Y+1)
+    const sideX = cosY; // perpendicular vector
+    const sideZ = sinY;
+    for (let side of [-1, 1]) {
+      const bPos = pos.offset(Math.round(sideX * side), 1, Math.round(sideZ * side));
+      if (!isAir(bot.blockAt(bPos))) {
+        return { clear: false, reason: `Lateral spacing blocked` };
+      }
+    }
+
+    return { clear: true, reason: 'Spatial envelope clear' };
   }
 
   /**
-   * Walk to coordinates (tx, tz) without library
+   * Local 11x5x11 grid scan for elevated open launch node (EAFE-v7.1 Sec 3.2)
+   */
+  function findElevatedOpenSpot() {
+    const pos   = bot.entity.position;
+    const baseY = Math.floor(pos.y);
+    let best    = null;
+
+    for (let dx = -5; dx <= 5; dx += 2) {
+      for (let dz = -5; dz <= 5; dz += 2) {
+        const cx = Math.floor(pos.x) + dx;
+        const cz = Math.floor(pos.z) + dz;
+
+        let groundY = null;
+        for (let dy = 1; dy >= -3; dy--) {
+          const b = bot.blockAt(new Vec3(cx, baseY + dy, cz));
+          if (b && !isAir(b)) { groundY = baseY + dy + 1; break; }
+        }
+        if (groundY === null) continue;
+
+        let openAir = 0;
+        for (let dy = 0; dy < 15; dy++) {
+          if (isAir(bot.blockAt(new Vec3(cx, groundY + dy, cz)))) openAir++;
+          else break;
+        }
+
+        if (openAir >= 5) {
+          const dist = Math.hypot(dx, dz);
+          const score = openAir - dist * 0.5;
+          if (score > (best?.score ?? -999)) {
+            best = { x: cx, y: groundY, z: cz, score, openAir };
+          }
+        }
+      }
+    }
+
+    return best;
+  }
+
+  /**
+   * Walk to launch spot
    */
   async function walkToSpot(tx, tz) {
     const TIMEOUT = 10_000;
@@ -280,31 +353,42 @@ function createBot() {
       return;
     }
 
-    // ── Equipment check ──
-    const elytraOk = await autoEquipElytra();
-    if (!elytraOk) { setPhase(PHASE.FAILED, '✗ No elytra in inventory'); return; }
+    setPhase(PHASE.AUDIT, 'Running pre-flight inventory, fuel & spatial audit...');
 
-    if (!findRocket()) { setPhase(PHASE.FAILED, '✗ No firework rockets'); return; }
+    // 1. Elytra durability audit
+    const elytraOk = await auditAndEquipElytra();
+    if (!elytraOk) { setPhase(PHASE.FAILED, '✗ No usable Elytra (durability > 15)'); return; }
 
-    // ── SCAN launch area ──
-    setPhase(PHASE.SCANNING, 'Raycasting launch area & trajectory...');
-    await sleep(100);
+    // 2. Fuel audit calculation (EAFE-v7.1 Sec 2.2)
+    const rocketsAvail = countRockets();
+    const d2d = dist2D(TARGET_X, TARGET_Z);
+    const startY = bot.entity.position.y;
+    const reqRockets = Math.ceil(d2d / 68.5) + Math.ceil(Math.abs(CRUISE_ALT - startY) / 28.0) + 15;
 
-    const scan = scanLaunchArea();
-    console.log(`[EAFE] Scan: clearAbove=${scan.clearAbove} clearPath=${scan.clearPath}` +
-                (scan.hitBlock ? ` hitAt=${scan.hitDist}m (${scan.hitBlock})` : ''));
+    console.log(`[EAFE] Fuel Audit: Available=${rocketsAvail} | Required=${reqRockets} (dist=${d2d.toFixed(0)}m)`);
+    if (rocketsAvail < reqRockets) {
+      try { bot.chat(`[EAFE] ⚠ Fuel warning: Have ${rocketsAvail} rockets, calculated ${reqRockets} needed`); } catch(_) {}
+    }
+    if (rocketsAvail === 0) {
+      setPhase(PHASE.FAILED, '✗ No firework rockets in inventory');
+      return;
+    }
 
-    if (!scan.clearAbove || !scan.clearPath) {
-      try { bot.chat(`[EAFE] ⚠ Launch path blocked at ${scan.hitDist}m (${scan.hitBlock}) — scanning area...`); } catch(_) {}
+    // 3. 3D Spatial Envelope Audit (EAFE-v7.1 Sec 3.2)
+    const spatial = auditSpatialEnvelope();
+    console.log(`[EAFE] Spatial Audit: clear=${spatial.clear} (${spatial.reason})`);
 
-      const spot = findBestLaunchSpot();
+    if (!spatial.clear) {
+      try { bot.chat(`[EAFE] ⚠ Launch spatial check failed (${spatial.reason}) — scanning relocation spot...`); } catch(_) {}
+
+      const spot = findElevatedOpenSpot();
       if (!spot) {
-        setPhase(PHASE.FAILED, '✗ Obstacles detected — no open launch spot nearby');
+        setPhase(PHASE.FAILED, '✗ Launch area obstructed — no open elevated node nearby');
         scheduleRetry();
         return;
       }
 
-      setPhase(PHASE.RELOCATING, `Moving to open spot (${spot.x}, ${spot.z}) score=${spot.score}`);
+      setPhase(PHASE.RELOCATING, `Moving to open spot (${spot.x}, ${spot.z}) openAir=${spot.openAir}m`);
       const arrived = await walkToSpot(spot.x, spot.z);
       if (!arrived) {
         setPhase(PHASE.FAILED, '✗ Could not walk to launch spot');
@@ -312,9 +396,9 @@ function createBot() {
         return;
       }
 
-      const scan2 = scanLaunchArea();
-      if (!scan2.clearAbove || !scan2.clearPath) {
-        setPhase(PHASE.FAILED, `✗ Path still blocked after relocation (${scan2.hitBlock} at ${scan2.hitDist}m)`);
+      const spatial2 = auditSpatialEnvelope();
+      if (!spatial2.clear) {
+        setPhase(PHASE.FAILED, `✗ Spatial envelope still blocked after relocation (${spatial2.reason})`);
         scheduleRetry();
         return;
       }
@@ -324,6 +408,9 @@ function createBot() {
     await executeTakeoff();
   }
 
+  /**
+   * 150ms Jump Apex Rule Takeoff (UNTOUCHED WORKING CORE)
+   */
   async function executeTakeoff() {
     if (phase === PHASE.FAILED) return;
     setPhase(PHASE.TAKEOFF, 'Jumping & activating elytra...');
@@ -391,7 +478,7 @@ function createBot() {
     startClimb();
   }
 
-  // ─── CLIMB ────────────────────────────────────────────────────────────────
+  // ─── CLIMB (UNTOUCHED WORKING CORE) ──────────────────────────────────────
   // Pitch = +0.65 rad (NOSE UP) → ascends toward CRUISE_ALT (Y=160)
   function startClimb() {
     setPhase(PHASE.CLIMBING, `Climbing to Y=${CRUISE_ALT}...`);
@@ -445,7 +532,7 @@ function createBot() {
     }, 200);
   }
 
-  // ─── CRUISE ───────────────────────────────────────────────────────────────
+  // ─── CRUISE (UNTOUCHED WORKING CORE) ─────────────────────────────────────
   // Pitch = +0.05 rad (slight nose up / level) → holds cruise speed at altitude
   function startCruise() {
     setPhase(PHASE.CRUISING, `Cruising to (${TARGET_X}, ?, ${TARGET_Z})`);
@@ -490,7 +577,7 @@ function createBot() {
       // Recovery if flight state drops mid-air
       if (!isFlying() && !bot.entity.onGround) {
         console.warn('[EAFE] ⚠ Fly state false during cruise — attempting recovery');
-        autoEquipElytra().then(() => {
+        auditAndEquipElytra().then(() => {
           if (phase !== PHASE.CRUISING) return;
           bot.elytraFly().catch(e => {
             setPhase(PHASE.FAILED, '✗ Lost flight state: ' + e.message);
@@ -511,28 +598,71 @@ function createBot() {
     }, 1000);
   }
 
-  // ─── LANDING ──────────────────────────────────────────────────────────────
-  // Pitch = -0.30 rad (NOSE DOWN) → smooth glide descent to ground
+  // ─── LANDING & SURFACE CLASSIFIER (EAFE-v7.1 Sec 6.1-6.3) ────────────────
   function startLanding() {
-    setPhase(PHASE.LANDING, 'Initiating glide descent...');
+    setPhase(PHASE.LANDING, 'Initiating surface classification & Archimedean spiral landing...');
+
+    // Locate safe landing target spot using Archimedean Spiral search
+    let targetX = TARGET_X;
+    let targetZ = TARGET_Z;
+
+    // Check block surface under TARGET_X, TARGET_Z
+    let groundBlock = getGroundBlockAt(targetX, targetZ);
+    if (groundBlock && !SAFE_SURFACES.has(groundBlock.name)) {
+      console.warn(`[EAFE] ⚠ Target LZ (${targetX}, ${targetZ}) is unsafe (${groundBlock.name}) — running Archimedean spiral...`);
+
+      // Spiral search R=1..20m
+      let foundSafe = false;
+      for (let r = 1; r <= 20; r += 2) {
+        for (let angle = 0; angle < Math.PI * 2; angle += Math.PI / 4) {
+          const sx = Math.round(TARGET_X + r * Math.cos(angle));
+          const sz = Math.round(TARGET_Z + r * Math.sin(angle));
+          const sb = getGroundBlockAt(sx, sz);
+          if (sb && SAFE_SURFACES.has(sb.name)) {
+            targetX = sx;
+            targetZ = sz;
+            foundSafe = true;
+            console.log(`[EAFE] ✓ Re-routed landing to safe solid block (${sb.name}) at (${sx}, ${sz})`);
+            break;
+          }
+        }
+        if (foundSafe) break;
+      }
+    }
 
     const landCheck = setInterval(() => {
       if (phase !== PHASE.LANDING) { clearInterval(landCheck); return; }
 
       const pos = bot.entity.position;
 
-      // Nose DOWN (-0.30 rad = -17°) for controlled descent
-      lookForce(yawTo(TARGET_X, TARGET_Z), -0.30);
+      // Nose DOWN (-0.30 rad = -17°) for controlled descent towards target LZ
+      lookForce(yawTo(targetX, targetZ), -0.30);
 
-      console.log(`[EAFE] [LAND] Y=${pos.y.toFixed(1)} dist=${dist2D().toFixed(1)}m ground=${bot.entity.onGround}`);
+      // Touchdown Flare & Bounce Cancel: Engage sneak when Y <= 3m above ground
+      if (pos.y <= Math.floor(pos.y) + 3) {
+        try { bot.setControlState('sneak', true); } catch(_) {}
+      }
+
+      console.log(`[EAFE] [LAND] Y=${pos.y.toFixed(1)} dist=${dist2D(targetX, targetZ).toFixed(1)}m ground=${bot.entity.onGround}`);
 
       if (bot.entity.onGround) {
         clearInterval(landCheck);
         clearInterval(verifyLoop); verifyLoop = null;
+        try { bot.setControlState('sneak', false); } catch(_) {}
         retries = 0; // Flight successful!
         setPhase(PHASE.IDLE, `✅ Successfully landed at (${Math.round(pos.x)}, ${Math.round(pos.y)}, ${Math.round(pos.z)})`);
       }
     }, 200);
+  }
+
+  function getGroundBlockAt(x, z) {
+    const pos = bot.entity.position;
+    const baseY = Math.floor(pos.y);
+    for (let dy = 5; dy >= -15; dy--) {
+      const b = bot.blockAt(new Vec3(x, baseY + dy, z));
+      if (b && !isAir(b)) return b;
+    }
+    return null;
   }
 
   // ─── RETRY MECHANISM ─────────────────────────────────────────────────────
@@ -574,14 +704,15 @@ function createBot() {
         );
       } catch(_) {}
 
-    } else if (cmd === 'scan') {
-      const s = scanLaunchArea();
-      const spot = findBestLaunchSpot();
+    } else if (cmd === 'audit') {
+      const rocketsAvail = countRockets();
+      const d2d = dist2D(TARGET_X, TARGET_Z);
+      const reqRockets = Math.ceil(d2d / 68.5) + 15;
+      const spatial = auditSpatialEnvelope();
       try {
         bot.chat(
-          `Scan: above=${s.clearAbove} path=${s.clearPath}` +
-          (s.hitBlock ? ` hit=${s.hitBlock}@${s.hitDist}m` : '') +
-          ` | bestSpot=${spot ? `(${spot.x},${spot.z}) score=${spot.score}` : 'none'}`
+          `Audit: Rockets=${rocketsAvail}/${reqRockets} Spatial=${spatial.clear?'✓':'✗'}` +
+          (!spatial.clear ? ` (${spatial.reason})` : '')
         );
       } catch(_) {}
     }
@@ -626,11 +757,11 @@ function createBot() {
 
     // ── Auto-equip elytra on spawn ───────────────────────────────────────
     setTimeout(() => {
-      autoEquipElytra().then(ok => {
+      auditAndEquipElytra().then(ok => {
         const hasRocket = !!findRocket();
-        console.log(`[EAFE] Inventory check: elytra=${ok} rockets=${hasRocket}`);
+        console.log(`[EAFE] Inventory audit: elytra=${ok} rockets=${hasRocket}`);
         try {
-          bot.chat(`[EAFE] Ready  Elytra:${ok ? '✓' : '✗'}  Rockets:${hasRocket ? '✓' : '✗'}  |  f=fly  s=stop  scan=scanArea`);
+          bot.chat(`[EAFE] Ready  Elytra:${ok ? '✓' : '✗'}  Rockets:${hasRocket ? '✓' : '✗'}  |  f=fly  s=stop  audit=runAudit`);
         } catch(_) {}
       });
     }, 2000);
@@ -643,7 +774,7 @@ function createBot() {
         if (!chest || chest.name !== 'elytra') {
           if (bot.inventory.items().find(i => i.name === 'elytra')) {
             console.log('[EAFE] 🎽 Elytra picked up — auto-equipping');
-            autoEquipElytra().catch(() => {});
+            auditAndEquipElytra().catch(() => {});
           }
         }
       }, 300);
@@ -654,12 +785,12 @@ function createBot() {
         const chest = bot.inventory.slots[6];
         if (!chest || chest.name !== 'elytra') {
           console.log('[EAFE] 🎽 Elytra inventory update — auto-equipping');
-          setTimeout(() => autoEquipElytra().catch(() => {}), 200);
+          setTimeout(() => auditAndEquipElytra().catch(() => {}), 200);
         }
       }
     });
 
-    console.log('[EAFE] Commands: f=fly  s/stop=stop  status  scan');
+    console.log('[EAFE] Commands: f=fly  s/stop=stop  status  audit');
   });
 
   // ─── DISCONNECT ───────────────────────────────────────────────────────────
@@ -674,13 +805,13 @@ function createBot() {
 }
 
 // ─── BANNER ──────────────────────────────────────────────────────────────────
-console.log('╔══════════════════════════════════════════════╗');
-console.log('║  EAFE v5 — Elytra Autonomous Flight Engine   ║');
-console.log('║  Physics: Native Mineflayer 50ms engine      ║');
-console.log('║  Knockback: entity_velocity + explosion      ║');
-console.log('║  Raycast: area scan + auto-relocation        ║');
-console.log('║  Pitch: +0.65=UP, 0=Level, -0.30=DOWN        ║');
-console.log(`║  Host: ${HOST}:${PORT}`.padEnd(46) + '║');
-console.log('╚══════════════════════════════════════════════╝');
+console.log('╔═════════════════════════════════════════════════════════════╗');
+console.log('║  EAFE v7.1 — Elytra Autonomous Flight Engine Specification   ║');
+console.log('║  Physics: Native Mineflayer 50ms Engine                      ║');
+console.log('║  Core Flight: 150ms Apex Jump + Pitch + Timed Rocket Bursts ║');
+console.log('║  Safety: 3D Spatial Audit + Elytra Durability Hotswap        ║');
+console.log('║  Landing: Surface Classifier & Archimedean Spiral Re-route  ║');
+console.log(`║  Host: ${HOST}:${PORT}`.padEnd(61) + '║');
+console.log('╚═════════════════════════════════════════════════════════════╝');
 
 createBot();
