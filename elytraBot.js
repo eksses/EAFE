@@ -1,32 +1,31 @@
 'use strict';
 /**
- * EAFE v9.4 — Retry Failure Rocket Waste Buffer & Empirically Verified Fuel Engine
- * =================================================================================
- * Fuel Formula Calibration (Includes Failed Takeoff/Climb Retry Buffer):
- *   N_req = N_distance + N_climb + N_retry_waste + N_landing_reserve
- *   - N_distance:
- *       FAST Mode:      d2D / 35.0   (30 m/s sprint)
- *       MEDIUM Mode:    d2D / 65.0   (22 m/s balanced)
- *       EFFICIENT Mode: d2D / 110.0  (14 m/s max saver)
- *   - N_climb:
- *       ceil(|ΔY| / 10.0) — Empirically calibrated climb efficiency of ~10.0m
- *       altitude gain per rocket at steep pitch (+0.65 rad).
- *   - N_retry_waste:
- *       (MAX_RETRIES * 3) = 9 rockets buffer explicitly allocated for potential
- *       takeoff or climb failures during retries.
- *   - N_landing_reserve:
- *       5 rockets reserve for Archimedean landing spiral & 128m terrain avoidance.
- *
- * Core Failsafes:
- *   1. Best Elytra Auto-Swap: Scans all slots (0..45) & equips highest durability Elytra.
- *   2. Yaw Engine: Math.atan2(-(x-px), -(z-pz)) for 100% accurate South (+Z) navigation.
- *   3. 2-Second Checker: Alarms & forces instant re-alignment if distance increases.
- *   4. Yaw-Lock Rocket Failsafe: Refuses rocket boost if heading error > 15°.
- *   5. Throttled Terrain Warnings: Rate-limited to 3.0s to eliminate log spam.
+ * EAFE v9.5 — Unified Console Terminal & In-Game Chat Control System
+ * ============================================================================
+ * Enhancements:
+ *   1. Dual Console & In-Game Chat Control System:
+ *      - You can type commands directly in the Linux terminal console OR in Minecraft chat!
+ *      - Flight Mode Commands:
+ *          fast / m fast / mode fast   --> Set to FAST Mode (30m/s sprint)
+ *          med  / m med  / mode med    --> Set to MEDIUM Mode (22m/s balanced)
+ *          low  / m low  / mode low    --> Set to EFFICIENT Mode (14m/s max saver)
+ *      - Flight Action Commands:
+ *          f / fly                     --> Start flight to target (100, 100)
+ *          s / stop                    --> Emergency hard stop
+ *          status                      --> View detailed position, mode, fuel & Elytra status
+ *          audit                       --> Run pre-flight fuel & spatial audit
+ *   2. Retry Failure Rocket Waste Buffer & Empirically Verified Fuel Engine:
+ *      - N_req = N_distance + N_climb + (MAX_RETRIES * 3) + 5
+ *   3. Best Elytra Auto-Swap: Scans all slots (0..45) & equips highest durability Elytra.
+ *   4. Yaw Engine: Math.atan2(-(x-px), -(z-pz)) for 100% accurate South (+Z) navigation.
+ *   5. 2-Second Checker: Alarms & forces instant re-alignment if distance increases.
+ *   6. Yaw-Lock Rocket Failsafe: Refuses rocket boost if heading error > 15°.
+ *   7. Throttled Terrain Warnings: Rate-limited to 3.0s to eliminate log spam.
  */
 
 const mineflayer    = require('mineflayer');
 const { Vec3 }      = require('vec3');
+const readline      = require('readline');
 const physicsLoader = require('@nxg-org/mineflayer-physics-util').default;
 const { EPhysicsCtx } = require('@nxg-org/mineflayer-physics-util');
 const { pathfinder, Movements, goals: { GoalBlock } } = require('mineflayer-pathfinder');
@@ -961,29 +960,29 @@ function createBot() {
     }, delay);
   }
 
-  // ─── CHAT COMMANDS ────────────────────────────────────────────────────────
-  bot.on('chat', (user, msg) => {
-    if (user === bot.username) return;
-    const cmd = msg.trim().toLowerCase();
+  // ─── UNIFIED USER COMMAND PROCESSOR ───────────────────────────────────────
+  function processUserCommand(cmd) {
+    cmd = cmd.trim().toLowerCase();
+    if (!cmd) return;
 
     if (cmd === 'f' || cmd === 'fly') {
       retries = 0;
       spatialClear = false;
       startFlight();
 
-    } else if (cmd === 'mode fast' || cmd === 'm fast') {
+    } else if (cmd === 'mode fast' || cmd === 'm fast' || cmd === 'fast') {
       currentMode = MODES.FAST;
-      console.log(`[EAFE] ⚡ Switched flight mode to ${MODES.FAST.name}`);
+      console.log(`[EAFE] ⚡ Flight Mode set to ${MODES.FAST.name}`);
       try { bot.chat(`[EAFE] ⚡ Flight Mode set to ${MODES.FAST.name}`); } catch(_) {}
 
-    } else if (cmd === 'mode med' || cmd === 'm med' || cmd === 'mode medium') {
+    } else if (cmd === 'mode med' || cmd === 'm med' || cmd === 'mode medium' || cmd === 'med' || cmd === 'medium') {
       currentMode = MODES.MEDIUM;
-      console.log(`[EAFE] ⚖ Switched flight mode to ${MODES.MEDIUM.name}`);
+      console.log(`[EAFE] ⚖ Flight Mode set to ${MODES.MEDIUM.name}`);
       try { bot.chat(`[EAFE] ⚖ Flight Mode set to ${MODES.MEDIUM.name}`); } catch(_) {}
 
-    } else if (cmd === 'mode low' || cmd === 'm low' || cmd === 'mode efficient') {
+    } else if (cmd === 'mode low' || cmd === 'm low' || cmd === 'mode efficient' || cmd === 'low' || cmd === 'efficient') {
       currentMode = MODES.EFFICIENT;
-      console.log(`[EAFE] 🍃 Switched flight mode to ${MODES.EFFICIENT.name}`);
+      console.log(`[EAFE] 🍃 Flight Mode set to ${MODES.EFFICIENT.name}`);
       try { bot.chat(`[EAFE] 🍃 Flight Mode set to ${MODES.EFFICIENT.name}`); } catch(_) {}
 
     } else if (cmd === 's' || cmd === 'stop') {
@@ -993,13 +992,9 @@ function createBot() {
     } else if (cmd === 'status') {
       const p = bot.entity.position;
       const elytraInfo = getElytraSummary();
-      try {
-        bot.chat(
-          `phase=${phase} mode=${currentMode.name} pos=(${p.x.toFixed(0)},${p.y.toFixed(0)},${p.z.toFixed(0)}) ` +
-          `elytra=${bot.entity.elytraFlying} elytraHealth=${elytraInfo.equippedDur}/432 ` +
-          `rockets=${countRockets()} spatialClear=${spatialClear?'✓':'✗'} dist=${dist2D().toFixed(0)}m`
-        );
-      } catch(_) {}
+      const statusMsg = `phase=${phase} mode=${currentMode.name} pos=(${p.x.toFixed(0)},${p.y.toFixed(0)},${p.z.toFixed(0)}) elytra=${bot.entity.elytraFlying} elytraHealth=${elytraInfo.equippedDur}/432 rockets=${countRockets()} spatialClear=${spatialClear?'✓':'✗'} dist=${dist2D().toFixed(0)}m`;
+      console.log(`[EAFE] [STATUS] ${statusMsg}`);
+      try { bot.chat(statusMsg); } catch(_) {}
 
     } else if (cmd === 'audit') {
       const rocketsAvail = countRockets();
@@ -1007,14 +1002,26 @@ function createBot() {
       const reqRockets = calculateRequiredRockets(d2d, CRUISE_ALT - bot.entity.position.y);
       const heading = findBestLaunchHeading();
       const elytraInfo = getElytraSummary();
-      try {
-        bot.chat(
-          `Audit [${currentMode.name}]: Rockets=${rocketsAvail}/${reqRockets} ElytraDur=${elytraInfo.equippedDur}/432 ` +
-          `Heading=${heading.headingName} Checkmark=${spatialClear?'✓':'✗'}`
-        );
-      } catch(_) {}
+      const auditMsg = `Audit [${currentMode.name}]: Rockets=${rocketsAvail}/${reqRockets} ElytraDur=${elytraInfo.equippedDur}/432 Heading=${heading.headingName} Checkmark=${spatialClear?'✓':'✗'}`;
+      console.log(`[EAFE] [AUDIT] ${auditMsg}`);
+      try { bot.chat(auditMsg); } catch(_) {}
     }
+  }
+
+  // Handle in-game chat commands
+  bot.on('chat', (user, msg) => {
+    if (user === bot.username) return;
+    processUserCommand(msg);
   });
+
+  // Handle terminal console stdin commands
+  if (process.stdin.isTTY || process.env.NODE_ENV !== 'test') {
+    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+    rl.on('line', (line) => {
+      console.log(`[CONSOLE COMMAND] > ${line}`);
+      processUserCommand(line);
+    });
+  }
 
   // ─── SPAWN & PACKET LISTENERS ──────────────────────────────────────────────
   bot.once('spawn', () => {
@@ -1101,11 +1108,11 @@ function createBot() {
 
 // ─── BANNER ──────────────────────────────────────────────────────────────────
 console.log('╔═════════════════════════════════════════════════════════════╗');
-console.log('║  EAFE v9.4 — Retry Failure Rocket Waste Buffer & Fuel Engine║');
-console.log('║  Retry Buffer: (MAX_RETRIES * 3) = 9 rockets for failed retries║');
+console.log('║  EAFE v9.5 — Dual Terminal Console & In-Game Chat Control  ║');
+console.log('║  Console & Chat: Type "fast", "med", "low", "f", "s", etc.  ║');
 console.log('║  Fuel Formula: N_req = N_dist + N_climb + N_retry + N_land  ║');
-console.log('║  Climb Efficiency: ~10.0m altitude gain per rocket (+0.65)  ║');
 console.log('║  Modes: FAST (35m/rk), MEDIUM (65m/rk), EFFICIENT (110m/rk)  ║');
+console.log('║  Best Elytra Auto-Swap: Auto-equips highest durability      ║');
 console.log(`║  Host: ${HOST}:${PORT}`.padEnd(61) + '║');
 console.log('╚═════════════════════════════════════════════════════════════╝');
 
