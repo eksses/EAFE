@@ -1,19 +1,17 @@
 'use strict';
 /**
- * EAFE v10.22 — Dual-Phase Target Orbit & Open-Ocean Wander Engine
+ * EAFE v10.23 — Anti-Spam Chat Limiter & Minimum Land Mass Precision (2x2 Platform Support)
  * ====================================================================================
  * Enhancements:
- *   1. Dual-Phase Target Orbit & Open-Ocean Wander Engine (startWanderScan):
- *      - Phase 1: DESTINATION_ORBIT (0m to 200m around target):
- *        Flies concentric expanding square rings (40m -> 80m -> 120m -> 160m -> 200m) directly centered on goal.
- *        If ANY land mass (platform/coastline) exists near the destination, it is detected and landed on in 2-5s!
- *      - Phase 2: OPEN_OCEAN_WANDER (200m+ expanding outward):
- *        If NO land exists near the goal (infinite ocean), the orbit ring automatically expands outward
- *        (250m -> 300m -> 400m -> 500m...) searching all surrounding loaded chunks for the nearest continent/island!
- *   2. Dense Chunk Land Detector (findSafeLandingSpotAround):
- *      - Scans expanding radial rings (R = 0, 2, 4, 6, 8... meters) across loaded chunk memory and targets
- *        the EXACT GEOMETRIC CENTROID of the nearest land mass immediately!
- *   3. 3-Layer Dynamic Terrain Safety & Wall Friction Escape Failsafe.
+ *   1. Anti-Spam Safe Chat Engine (safeChat):
+ *      - Enforces strict minimum 4.0s cooldown interval across all bot.chat() messages, completely
+ *        eliminating 'Kicked for spamming' server kicks during Elytra low-health alerts and status broadcasts!
+ *   2. Minimum Land Mass Precision (2x2 / 3x3 Platform Support):
+ *      - Lowest land mass size EAFE can accurately land on is 2x2 blocks (4 m²)!
+ *      - findLandMassCenter maps 2D bounding boxes and calculates the exact geometric centroid
+ *        (Target X, Target Z) in the middle of small platforms away from all edges.
+ *      - Decelerates to 0 m/s forward velocity directly above the centroid before dropping vertically onto the block.
+ *   3. Dual-Phase Target Orbit (0-200m) & Open-Ocean Wander Engine (200m+).
  *
  * Commands: f [X Z], setgoal X Z, m fast/med/low, s, status, audit.
  */
@@ -170,6 +168,18 @@ function createBot() {
     flyLoop = verifyLoop = rocketLoop = climbLoop = null;
   }
 
+  let lastChatTimestamp = 0;
+  /**
+   * Anti-Spam Safe Chat Helper: Enforces minimum 4-second delay between chat messages
+   * to eliminate 'Kicked for spamming' server kicks!
+   */
+  function safeChat(msg) {
+    if (!msg || typeof msg !== 'string') return;
+    if (Date.now() - lastChatTimestamp < 4000) return;
+    lastChatTimestamp = Date.now();
+    try { bot.chat(msg.substring(0, 256)); } catch(_) {}
+  }
+
   // ─── Emergency stop ───────────────────────────────────────────────────────
   function emergencyStop(reason) {
     phase = PHASE.IDLE;
@@ -182,7 +192,7 @@ function createBot() {
     try { bot.setControlState('sneak', true); } catch(_) {}
     setTimeout(() => { try { bot.setControlState('sneak', false); } catch(_) {} }, 600);
     console.log(`[EAFE] ⛔ STOP — ${reason}`);
-    try { bot.chat(`[EAFE] ⛔ Stopped: ${reason}`); } catch(_) {}
+    safeChat(`[EAFE] ⛔ Stopped: ${reason}`);
   }
 
   // ─── Set phase (logs + chat) ──────────────────────────────────────────────
@@ -190,7 +200,7 @@ function createBot() {
     phase = p;
     const line = `[EAFE] [${p}] ${msg || ''}`;
     console.log(line);
-    try { bot.chat(line.substring(0, 256)); } catch(_) {}
+    safeChat(line.substring(0, 256));
   }
 
   // ─── REAL-TIME SERVER RENDER DISTANCE ENGINE ────────────────────────────────
@@ -357,9 +367,7 @@ function createBot() {
 
     if (bestSlot === null) {
       console.warn(`[EAFE] ⚠ No usable spare Elytra found (durability > 10). Currently equipped: ${currentEquippedDur > 0 ? currentEquippedDur : 0}/432`);
-      try {
-        bot.chat(`[EAFE] ⚠ Elytra health critical (${currentEquippedDur > 0 ? currentEquippedDur : 0}/432)! Please give me a fresh Elytra!`);
-      } catch(_) {}
+      safeChat(`[EAFE] ⚠ Elytra health critical (${currentEquippedDur > 0 ? currentEquippedDur : 0}/432)! Please give me a fresh Elytra!`);
       return false;
     }
 
@@ -368,7 +376,7 @@ function createBot() {
     try {
       await bot.equip(spareItem, 'torso');
       console.log(`[EAFE] 🎽 Auto-swapped to best Elytra from slot ${bestSlot} (Durability: ${bestDur}/432, old was ${currentEquippedDur}/432)`);
-      try { bot.chat(`[EAFE] 🎽 Auto-swapped to best Elytra (${bestDur}/432 durability)`); } catch(_) {}
+      safeChat(`[EAFE] 🎽 Auto-swapped to best Elytra (${bestDur}/432 durability)`);
       return true;
     } catch(e) {
       console.error('[EAFE] ✗ Equip best elytra failed:', e.message);
@@ -394,7 +402,7 @@ function createBot() {
         fireRocketDirect();
       } else {
         console.error('[EAFE] ⚠ Out of spare Elytras! Emergency landing initiated...');
-        try { bot.chat('[EAFE] ⚠ Elytra durability critical (<=10) & no spares! Emergency landing!'); } catch(_) {}
+        safeChat('[EAFE] ⚠ Elytra durability critical (<=10) & no spares! Emergency landing!');
         startLanding();
       }
     }
