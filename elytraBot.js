@@ -1,22 +1,21 @@
 'use strict';
 /**
- * EAFE v9.8 — Real-Time Arrival Chunk Scan & Unconditional Landing/Wander Reserve
- * =================================================================================
- * Enhancements & Correction:
- *   1. Real-Time Arrival Chunk Scan (startLanding):
- *      - Pre-flight cannot scan far chunks before flying there (chunks are ungenerated/unloaded).
- *      - Upon arriving at target coordinates (dist < 25m), target chunks are loaded in memory!
- *      - As altitude drops, startLanding() performs real-time block inspection of the landing zone.
- *      - If the target LZ is water/lava/liquid, it immediately executes an expanding Archimedean
- *        spiral search (up to 100m radius) across loaded chunks to find solid ground (grass, stone, dirt, etc.).
- *      - Active Wander Rocket Firing: If hovering over liquid below Y=75 while searching for land,
- *        it fires reserved wander rockets to stay airborne until over solid land!
- *   2. Unconditional Landing & Wander Rocket Reserve (N_wander_landing = 12):
- *      - Pre-flight fuel audit ALWAYS reserves 12 rockets for arrival chunk scan, safe land wander,
- *        and landing flares, guaranteeing the bot never runs out of fireworks even if the destination is water!
- *   3. True Pitch-and-Glide Rocket Saver Mode (EFFICIENT = 150m/rocket):
- *      - FAST = 35m/rk, MEDIUM = 70m/rk, EFFICIENT = 150m/rk (saves 70% fireworks over long distances).
- *   4. Dual Console Terminal & In-Game Chat Commands: f [X Z], setgoal X Z, m fast/med/low, s, status, audit.
+ * EAFE v9.9 — High-Altitude Ocean Wander & Scan Engine (WANDER_SCAN Phase)
+ * ============================================================================
+ * Resolution for Low-Altitude Water Hovering:
+ *   If no solid ground is found at destination (ocean / sea / water body):
+ *     1. CANCEL LOW-ALTITUDE LANDING IMMEDIATELY — stops rocket burning at Y=75.
+ *     2. CLIMB TO OPTIMAL SCANNING ALTITUDE (Y=120m): Ascends to Y=120 to maximize
+ *        render distance chunk visibility across the ocean floor and surface.
+ *     3. HIGH-ALTITUDE WANDER & SCAN (WANDER_SCAN Phase): Orbits/wanders outwards while
+ *        scanning loaded chunks for any solid land (islands, shores, mainland, obsidian, etc.).
+ *     4. LAND UPON DISCOVERY: Once solid land is detected, re-routes landing trajectory
+ *        and lands safely on the discovered shore/island!
+ *
+ * Core Failsafes:
+ *   - Unconditional Landing & Wander Reserve (N_wander_landing = 12 rockets).
+ *   - True Pitch-and-Glide Rocket Saver Mode (EFFICIENT = 150m/rocket).
+ *   - Dual Console Terminal & In-Game Chat Commands: f [X Z], setgoal X Z, m fast/med/low, s, status, audit.
  */
 
 const mineflayer    = require('mineflayer');
@@ -32,7 +31,8 @@ const PORT       = 25565;
 const USERNAME   = 'test';
 const DEFAULT_TARGET_X = 100;
 const DEFAULT_TARGET_Z = 100;
-const CRUISE_ALT       = 180;   // Safe target altitude (Y=180) to clear all terrain
+const CRUISE_ALT       = 180;   // Safe target cruise altitude (Y=180)
+const SCAN_ALT         = 120;   // Optimal render-distance ocean scan altitude (Y=120)
 const MAX_RETRIES      = 3;     // retries before giving up
 
 // ─── FLIGHT MODES ────────────────────────────────────────────────────────────
@@ -59,15 +59,16 @@ const MODES = {
 
 // ─── PHASE STATE ─────────────────────────────────────────────────────────────
 const PHASE = {
-  IDLE:       'IDLE',
-  AUDIT:      'AUDIT',        // pre-flight inventory, fuel & spatial audit
-  RELOCATING: 'RELOCATING',   // A* pathfinding & block-digging en route to open launch spot
-  TAKEOFF:    'TAKEOFF',      // 150ms jump apex + elytraFly() + instant off-hand rocket
-  CLIMBING:   'CLIMBING',     // continuous nose up (+0.65 to +0.75), gaining altitude
-  CRUISING:   'CRUISING',     // level (+0.05), heading to target
-  DEAD_STICK: 'DEAD_STICK',   // unpowered glide cruise (0 rockets remaining)
-  LANDING:    'LANDING',      // Archimedean spiral & surface glide (-0.30)
-  FAILED:     'FAILED',       // flight failed, auto-retry scheduled
+  IDLE:        'IDLE',
+  AUDIT:       'AUDIT',        // pre-flight inventory, fuel & spatial audit
+  RELOCATING:  'RELOCATING',   // A* pathfinding & block-digging en route to open launch spot
+  TAKEOFF:     'TAKEOFF',      // 150ms jump apex + elytraFly() + instant off-hand rocket
+  CLIMBING:    'CLIMBING',     // continuous nose up (+0.65 to +0.75), gaining altitude
+  CRUISING:    'CRUISING',     // level (+0.05), heading to target
+  WANDER_SCAN: 'WANDER_SCAN',  // High-altitude (Y=120) ocean wander & render-distance land scan
+  DEAD_STICK:  'DEAD_STICK',   // unpowered glide cruise (0 rockets remaining)
+  LANDING:     'LANDING',      // Archimedean spiral & surface glide (-0.30)
+  FAILED:      'FAILED',       // flight failed, auto-retry scheduled
 };
 
 // Whitelisted safe landing & launch surfaces (STRICT: NO WATER, NO LAVA)
@@ -119,6 +120,8 @@ function createBot() {
   let spatialClear    = false;        // Checkmark flag for ground clearance
   let activeLaunchYaw = 0;            // Selected takeoff heading
   let lastTerrainWarn = 0;            // Rate-limiter timestamp for terrain warnings
+  let wanderAngle     = 0;            // High-altitude spiral wander angle
+  let wanderRadius    = 100;          // High-altitude spiral wander radius
   let physEngine      = null;
   let flyLoop         = null;
   let verifyLoop      = null;
@@ -304,20 +307,13 @@ function createBot() {
 
   /**
    * Empirically Verified Firework Fuel Calculation
-   * Formula:
-   *   N_req = N_distance + N_climb + N_retry_waste + N_wander_landing
-   * where:
-   *   N_distance       = ceil(d2D / fuelDistDivider) (FAST: 35.0, MEDIUM: 70.0, EFFICIENT: 150.0)
-   *   N_climb          = ceil(|ΔY| / 10.0)
-   *   N_retry_waste    = (MAX_RETRIES * 3) = 9 rockets
-   *   N_wander_landing = 12 rockets (UNCONDITIONALLY reserved for arrival chunk scan,
-   *                      100m safe land wander & descent flares)
+   * N_req = N_distance + N_climb + N_retry_waste + N_wander_landing
    */
   function calculateRequiredRockets(d2d, deltaY) {
     const dReq = Math.ceil(d2d / currentMode.fuelDistDivider);
     const yReq = Math.ceil(Math.abs(deltaY) / 10.0);
     const retryWasteBuffer    = MAX_RETRIES * 3; // 9 rockets buffer for up to 3 failed retries
-    const wanderLandingBuffer = 12;              // 12 rockets unconditionally reserved for landing & 100m wander
+    const wanderLandingBuffer = 12;              // 12 rockets unconditionally reserved for landing & wander
 
     return dReq + yReq + retryWasteBuffer + wanderLandingBuffer;
   }
@@ -885,11 +881,11 @@ function createBot() {
   }
 
   // ─────────────────────────────────────────────────────────────────────────
-  //  REAL-TIME ARRIVAL CHUNK SCAN & 100m SAFE LANDING WANDER ENGINE
+  //  HIGH-ALTITUDE OCEAN WANDER & RENDER-DISTANCE LAND SCAN ENGINE
   // ─────────────────────────────────────────────────────────────────────────
 
   /**
-   * Scans expanding concentric rings from r = 1m to r = 100m around (centerX, centerZ)
+   * Scans expanding concentric rings from r = 1m to r = 128m around (centerX, centerZ)
    * across real-time loaded chunks to locate nearest solid safe land surface (grass, stone, dirt, wood, etc.).
    */
   function findSafeLandingSpotAround(centerX, centerZ) {
@@ -898,8 +894,8 @@ function createBot() {
       return { x: centerX, z: centerZ, blockName: directGround.name, safe: true };
     }
 
-    // Real-Time Expanding Archimedean Search up to 100m radius across loaded chunks
-    for (let r = 2; r <= 100; r += 3) {
+    // Real-Time Expanding Archimedean Search up to 128m radius across loaded chunks
+    for (let r = 2; r <= 128; r += 4) {
       const stepAngle = Math.max(Math.PI / 12, Math.PI / (r * 0.5));
       for (let angle = 0; angle < Math.PI * 2; angle += stepAngle) {
         const sx = Math.round(centerX + r * Math.cos(angle));
@@ -914,6 +910,70 @@ function createBot() {
     return { x: centerX, z: centerZ, blockName: 'unknown', safe: false };
   }
 
+  /**
+   * High-Altitude Ocean Wander & Scan (WANDER_SCAN Phase)
+   * Triggered when target LZ is ocean/water and no solid ground is in immediate arrival chunks.
+   * Climbs to Y=120m altitude to maximize render-distance visibility across chunks!
+   */
+  function startWanderScan() {
+    setPhase(PHASE.WANDER_SCAN, `🌊 Ocean LZ detected — climbing to Y=${SCAN_ALT} for High-Altitude Ocean Wander & Land Scan...`);
+
+    wanderAngle = 0;
+    wanderRadius = 100;
+
+    if (flyLoop) clearInterval(flyLoop);
+    flyLoop = setInterval(() => {
+      if (phase !== PHASE.WANDER_SCAN) { clearInterval(flyLoop); flyLoop = null; return; }
+
+      const pos = bot.entity.position;
+
+      // 1. Maintain Optimal Ocean Scan Altitude Y=120m
+      if (pos.y < SCAN_ALT - 10 && countRockets() > 0) {
+        console.log(`[EAFE] 🚀 Pitching UP (+0.60) to maintain high-altitude ocean scan altitude Y=${SCAN_ALT} (current Y=${pos.y.toFixed(1)})...`);
+        lookForce(bot.entity.yaw, 0.60);
+        fireRocketDirect();
+      }
+
+      // 2. Scan all loaded chunks around current high-altitude position
+      const foundSpot = findSafeLandingSpotAround(Math.round(pos.x), Math.round(pos.z));
+      if (foundSpot.safe) {
+        clearInterval(flyLoop); flyLoop = null;
+        console.log(`[EAFE] 🏝 SOLID LAND DISCOVERED at (${foundSpot.x}, ${foundSpot.z}) [${foundSpot.blockName}] after high-altitude scan!`);
+        try {
+          bot.chat(`[EAFE] 🏝 Solid land discovered at (${foundSpot.x}, ${foundSpot.z}) on ${foundSpot.blockName}! Re-routing landing...`);
+        } catch(_) {}
+
+        activeTargetX = foundSpot.x;
+        activeTargetZ = foundSpot.z;
+        startLanding();
+        return;
+      }
+
+      // 3. Orbit in expanding spiral path across ocean
+      wanderAngle += 0.15;
+      if (wanderAngle >= Math.PI * 2) {
+        wanderAngle = 0;
+        wanderRadius += 50; // Expand search orbit by 50m
+        if (wanderRadius > 500) wanderRadius = 100; // Loop search spiral
+      }
+
+      const scanWayX = activeTargetX + Math.round(wanderRadius * Math.cos(wanderAngle));
+      const scanWayZ = activeTargetZ + Math.round(wanderRadius * Math.sin(wanderAngle));
+      const targetYaw = yawTo(scanWayX, scanWayZ);
+
+      const vel = bot.entity.velocity;
+      const speed = Math.hypot(vel.x, vel.y, vel.z);
+
+      if (speed < 0.7 && countRockets() > 0) {
+        fireRocketDirect(targetYaw);
+      }
+
+      lookForce(targetYaw, currentMode.pitch);
+
+      console.log(`[EAFE] [WANDER_SCAN] Y=${pos.y.toFixed(1)} radius=${wanderRadius}m orbitAngle=${(wanderAngle*180/Math.PI).toFixed(0)}° speed=${(speed*20).toFixed(1)}m/s`);
+    }, 200);
+  }
+
   function startLanding() {
     setPhase(PHASE.LANDING, `Arrived at target area — scanning arrival chunks at (${activeTargetX}, ${activeTargetZ})...`);
 
@@ -923,14 +983,14 @@ function createBot() {
     let targetX = safeSpot.x;
     let targetZ = safeSpot.z;
 
-    if (safeSpot.x !== activeTargetX || safeSpot.z !== activeTargetZ) {
-      console.warn(`[EAFE] 🌊 Arrival Chunk Scan: Target LZ (${activeTargetX}, ${activeTargetZ}) is unsafe liquid — wandering to solid ground at (${targetX}, ${targetZ}) [${safeSpot.blockName}]`);
-      try {
-        bot.chat(`[EAFE] 🌊 Target LZ is liquid (water/lava) — wandering to safe solid ground (${targetX}, ${targetZ})!`);
-      } catch(_) {}
-    } else {
-      console.log(`[EAFE] ✓ Arrival Chunk Scan: Landing spot approved on solid block [${safeSpot.blockName}]`);
+    // IF NO SOLID GROUND IN ARRIVAL CHUNKS: CANCEL LANDING IMMEDIATELY & START HIGH-ALTITUDE WANDER SCAN!
+    if (!safeSpot.safe) {
+      console.warn(`[EAFE] 🌊 CANCEL LANDING: Target area (${activeTargetX}, ${activeTargetZ}) is open ocean with NO solid land nearby! Initiating High-Altitude Wander Scan...`);
+      startWanderScan();
+      return;
     }
+
+    console.log(`[EAFE] ✓ Arrival Chunk Scan: Solid landing spot approved at (${targetX}, ${targetZ}) on [${safeSpot.blockName}]`);
 
     const landCheck = setInterval(() => {
       if (phase !== PHASE.LANDING) { clearInterval(landCheck); return; }
@@ -939,12 +999,11 @@ function createBot() {
       const groundBlock = getGroundBlockAt(targetX, targetZ);
       const relY = pos.y - (groundBlock?.position?.y ?? 70);
 
-      // Active Wander Rocket Failsafe: If bot drops below Y=75 while maneuvering over liquid, fire a rocket!
       const currentBlockUnder = getGroundBlockAt(Math.round(pos.x), Math.round(pos.z));
       const overLiquid = !currentBlockUnder || isWaterOrLava(currentBlockUnder) || !SAFE_SURFACES.has(currentBlockUnder.name);
 
       if (overLiquid && pos.y < 75 && countRockets() > 0) {
-        console.warn(`[EAFE] 🌊 Hovering over liquid (Y=${pos.y.toFixed(1)}) — firing WANDER ROCKET to reach solid land (${targetX}, ${targetZ})!`);
+        console.warn(`[EAFE] 🌊 Hovering over liquid (Y=${pos.y.toFixed(1)}) — redirecting to safe land (${targetX}, ${targetZ})!`);
         lookForce(yawTo(targetX, targetZ), 0.40);
         fireRocketDirect();
       } else if (relY <= 4.0) {
@@ -1175,10 +1234,10 @@ function createBot() {
 
 // ─── BANNER ──────────────────────────────────────────────────────────────────
 console.log('╔═════════════════════════════════════════════════════════════╗');
-console.log('║  EAFE v9.8 — Real-Time Arrival Scan & Landing Wander Reserve║');
-console.log('║  Pre-Flight Audit: Unconditionally reserves 12 rockets      ║');
-console.log('║  Arrival Scan: Scans destination chunks as altitude drops    ║');
-console.log('║  100m Landing Wander: Spirals out to solid ground over water ║');
+console.log('║  EAFE v9.9 — High-Altitude Ocean Wander & Scan Engine       ║');
+console.log('║  Cancel Landing: Immediately aborts Y=75 low hover on ocean ║');
+console.log('║  Climb to Y=120: Ascends to Y=120 to maximize chunk view    ║');
+console.log('║  High-Alt Wander Scan: Orbits until solid land is detected  ║');
 console.log('║  Modes: FAST (35m/rk), MEDIUM (70m/rk), EFFICIENT (150m/rk)  ║');
 console.log(`║  Host: ${HOST}:${PORT}`.padEnd(61) + '║');
 console.log('╚═════════════════════════════════════════════════════════════╝');
