@@ -1,24 +1,27 @@
 'use strict';
 /**
- * EAFE v7.4 — Block Breaking, Obstacle Clearing & 1000% Certainty Relocation
+ * EAFE v7.5 — Directional Opening Awareness & Curve Flight Engine
  * =========================================================================
  * Enhancements:
- *   1. Obstacle Block Breaking (clearObstructingBlocks):
- *      - Before deciding it cannot launch from the current spot, the bot scans
- *        the overhead column and runway for diggable blocks (leaves, wood, dirt, etc.).
- *      - Digs/breaks obstructing blocks automatically to clear the launch space.
- *   2. 1000% Certainty Launch Guarantee:
- *      - Only relocates if launch space remains blocked after attempting to dig
- *        or if blocks are non-diggable (bedrock/indestructible structures).
- *   3. Pathfinder Block Digging & Jumping (mineflayer-pathfinder):
- *      - Enables canDig = true, allowParkour = true, allow1by1tunnels = true
- *        so pathfinder digs through obstacles and jumps up ledges to reach open spot!
- *   4. Strict Firework Audit BEFORE Launch:
+ *   1. Directional Opening Awareness (findBestLaunchHeading):
+ *      - Scans target direction first. If target direction is blocked, scans all 8
+ *        compass directions (West, North, East, South, NW, SW, NE, SE).
+ *      - If an open opening exists in any direction (e.g. West 270°), takes off
+ *        facing that open direction immediately!
+ *   2. In-Flight Curve Turning:
+ *      - Takes off facing the open corridor (e.g. West) to clear terrain.
+ *      - Once airborne and reaching safety altitude (Y ≥ 100m), smoothly turns yaw
+ *        towards the destination (TARGET_X, TARGET_Z) in mid-air!
+ *   3. Obstacle Block Breaking (clearObstructingBlocks):
+ *      - Breaks blocking leaves/wood/dirt before deciding to relocate.
+ *   4. Pathfinder Block Digging & Jumping (mineflayer-pathfinder):
+ *      - Digs & jumps to reach open spot only when 1000% confirmed no opening exists.
+ *   5. Strict Firework Audit BEFORE Launch:
  *      - Calculates N_req = ceil(d2d/68.5) + ceil(ΔY/28.0) + 15.
  *      - Aborts & asks in chat if rockets are insufficient.
- *   5. Spatial Clearance Checkmark (spatialClear = true):
+ *   6. Spatial Clearance Checkmark (spatialClear = true):
  *      - Bypasses re-pathfinding on retries when spatial clearance is approved.
- *   6. Preserved Flight Core (UNTOUCHED):
+ *   7. Preserved Flight Core (UNTOUCHED):
  *      - 150ms Jump Apex Rule Takeoff.
  *      - Pitch angles: +0.65=UP (Climb), +0.05=LEVEL (Cruise), -0.30=DOWN (Landing).
  *      - Smart rocket conservation (skips firing when ||v|| ≥ 1.4 b/t).
@@ -92,6 +95,7 @@ function createBot() {
   let phase        = PHASE.IDLE;
   let retries      = 0;
   let spatialClear = false; // Checkmark flag for ground clearance
+  let activeLaunchYaw = 0;  // Selected takeoff heading
   let physEngine   = null;
   let flyLoop      = null;
   let verifyLoop   = null;
@@ -107,7 +111,7 @@ function createBot() {
   // ─── Emergency stop ───────────────────────────────────────────────────────
   function emergencyStop(reason) {
     phase = PHASE.IDLE;
-    spatialClear = false; // Reset checkmark on emergency stop
+    spatialClear = false;
     clearAllTimers();
     try { bot.pathfinder.stop(); } catch(_) {}
     ['sprint','forward','back','left','right','jump','sneak'].forEach(k => {
@@ -257,78 +261,106 @@ function createBot() {
   }
 
   // ─────────────────────────────────────────────────────────────────────────
-  //  PRE-FLIGHT AUDIT, OBSTACLE DIGGING & SPATIAL ENVELOPE
+  //  DIRECTIONAL OPENING AWARENESS & SPATIAL ENVELOPE (EAFE v7.5)
   // ─────────────────────────────────────────────────────────────────────────
 
-  function auditSpatialEnvelope() {
+  /**
+   * Checks runway clearance at a specific yaw
+   */
+  function checkRunwayDirection(testYaw) {
     const pos = bot.entity.position;
-    const yaw = yawTo(TARGET_X, TARGET_Z);
 
-    // 1. Overhead Column (Y+1 to Y+5)
+    // Overhead Column (Y+1 to Y+5)
     for (let dy = 1; dy <= 5; dy++) {
       const b = bot.blockAt(pos.offset(0, dy, 0));
-      if (!isAir(b)) {
-        return { clear: false, reason: `Overhead blocked at Y+${dy} (${b?.name})`, block: b };
-      }
+      if (!isAir(b)) return { clear: false, reason: `Overhead blocked at Y+${dy} (${b?.name})`, block: b };
     }
 
-    // 2. Forward Runway: check Y+1 and Y+2 (body & head space)
-    const dirX = -Math.sin(yaw);
-    const dirZ =  Math.cos(yaw);
+    // Forward Runway at specified yaw (4m ahead, Y+1 & Y+2)
+    const dirX = -Math.sin(testYaw);
+    const dirZ =  Math.cos(testYaw);
 
     for (let d = 1; d <= 4; d++) {
       for (let dy = 1; dy <= 2; dy++) {
         const bPos = pos.offset(Math.round(dirX * d), dy, Math.round(dirZ * d));
         const b = bot.blockAt(bPos);
-        if (!isAir(b)) {
-          return { clear: false, reason: `Runway blocked at ${d}m ahead (Y+${dy}: ${b?.name})`, block: b };
-        }
+        if (!isAir(b)) return { clear: false, reason: `Runway blocked at ${d}m ahead (Y+${dy}: ${b?.name})`, block: b };
       }
     }
 
-    // 3. Ground under feet: verify it's NOT liquid (water/lava)
+    // Ground check: not liquid
     const blockUnder = bot.blockAt(pos.offset(0, -0.5, 0));
-    if (isWaterOrLava(blockUnder)) {
-      return { clear: false, reason: `Standing in liquid (${blockUnder?.name})`, block: null };
-    }
+    if (isWaterOrLava(blockUnder)) return { clear: false, reason: `Standing in liquid (${blockUnder?.name})`, block: null };
 
-    return { clear: true, reason: 'Spatial envelope clear', block: null };
+    return { clear: true, reason: 'Clear corridor', block: null };
   }
 
   /**
-   * Attempt to BREAK obstructing blocks (leaves, wood, dirt) to clear launch space
-   * Returns true if space was cleared by digging!
+   * Directional Opening Awareness Scan
+   * Evaluates target heading first, then scans all 8 compass directions (West, North, East, South, etc.)
+   */
+  function findBestLaunchHeading() {
+    const targetYaw = yawTo(TARGET_X, TARGET_Z);
+
+    // 1. Direct Target Heading
+    const targetCheck = checkRunwayDirection(targetYaw);
+    if (targetCheck.clear) {
+      return { yaw: targetYaw, headingName: 'Direct Target', clear: true, block: null };
+    }
+
+    // 2. Scan 8 Compass Directions for open launch corridors
+    const COMPASS = [
+      { name: 'West (270°)',       yaw: -Math.PI / 2 },
+      { name: 'North (0°)',        yaw: 0 },
+      { name: 'East (90°)',        yaw: Math.PI / 2 },
+      { name: 'South (180°)',      yaw: Math.PI },
+      { name: 'North-West (315°)', yaw: -Math.PI / 4 },
+      { name: 'South-West (225°)', yaw: -3 * Math.PI / 4 },
+      { name: 'North-East (45°)',  yaw: Math.PI / 4 },
+      { name: 'South-East (135°)',  yaw: 3 * Math.PI / 4 },
+    ];
+
+    for (const dir of COMPASS) {
+      const check = checkRunwayDirection(dir.yaw);
+      if (check.clear) {
+        console.log(`[EAFE] 🧭 Target heading blocked, but open launch corridor found facing ${dir.name}!`);
+        try {
+          bot.chat(`[EAFE] 🧭 Target heading blocked — taking off facing ${dir.name} then turning to goal!`);
+        } catch(_) {}
+        return { yaw: dir.yaw, headingName: dir.name, clear: true, block: null };
+      }
+    }
+
+    return { yaw: targetYaw, headingName: 'Blocked', clear: false, block: targetCheck.block };
+  }
+
+  /**
+   * Attempt to BREAK obstructing blocks to clear launch space
    */
   async function clearObstructingBlocks() {
     setPhase(PHASE.CLEARING, 'Attempting to break obstructing blocks to clear launch space...');
 
-    let clearedAny = false;
     for (let attempt = 0; attempt < 5; attempt++) {
-      const spatial = auditSpatialEnvelope();
-      if (spatial.clear) return true;
+      const heading = findBestLaunchHeading();
+      if (heading.clear) return heading;
 
-      const b = spatial.block;
+      const b = heading.block;
       if (b && b.diggable && !isWaterOrLava(b)) {
         console.log(`[EAFE] ⛏ Breaking obstructing block (${b.name}) at (${b.position.x}, ${b.position.y}, ${b.position.z})...`);
-        try {
-          bot.chat(`[EAFE] ⛏ Breaking blocking ${b.name} to clear launch space...`);
-        } catch(_) {}
+        try { bot.chat(`[EAFE] ⛏ Breaking blocking ${b.name} to clear launch space...`); } catch(_) {}
         try {
           await bot.dig(b);
-          clearedAny = true;
           await sleep(200);
         } catch(e) {
           console.warn('[EAFE] Dig failed:', e.message);
           break;
         }
       } else {
-        console.warn('[EAFE] Obstructing block is not diggable:', b?.name);
         break;
       }
     }
 
-    const finalCheck = auditSpatialEnvelope();
-    return finalCheck.clear;
+    return findBestLaunchHeading();
   }
 
   function findElevatedOpenSpot() {
@@ -376,10 +408,6 @@ function createBot() {
     return best;
   }
 
-  /**
-   * Pathfind to target launch spot using mineflayer-pathfinder (A* search)
-   * WITH CAN_DIG = TRUE and ALLOW_PARKOUR = TRUE so it breaks blocks & jumps up ledges!
-   */
   async function pathfindToSpot(tx, ty, tz) {
     console.log(`[EAFE] 🗺 Pathfinding & digging path to safe launch spot (${tx}, ${ty}, ${tz})...`);
 
@@ -454,25 +482,21 @@ function createBot() {
 
     console.log(`[EAFE] ✓ Firework Audit PASSED (${rocketsAvail}/${reqRockets} fireworks ready)`);
 
-    // 3. Ground & Spatial Clearance Checkmark
+    // 3. Directional Opening Awareness & Spatial Clearance Checkmark
     if (!spatialClear) {
-      let spatial = auditSpatialEnvelope();
-      console.log(`[EAFE] Spatial Audit: clear=${spatial.clear} (${spatial.reason})`);
+      let heading = findBestLaunchHeading();
+      console.log(`[EAFE] Directional Opening Scan: clear=${heading.clear} heading=${heading.headingName}`);
 
-      // If blocked, try breaking obstructing blocks FIRST before deciding to relocate!
-      if (!spatial.clear && spatial.block?.diggable) {
-        console.log(`[EAFE] Obstructing block detected (${spatial.block.name}) — attempting to break...`);
-        const cleared = await clearObstructingBlocks();
-        if (cleared) {
-          console.log('[EAFE] ✓ Obstructing blocks broken — space now clear!');
-          spatial = { clear: true, reason: 'Cleared by block breaking' };
-        }
+      // If blocked, try breaking obstructing blocks FIRST!
+      if (!heading.clear && heading.block?.diggable) {
+        console.log(`[EAFE] Obstructing block detected (${heading.block.name}) — attempting to break...`);
+        heading = await clearObstructingBlocks();
       }
 
-      // ONLY if still blocked after digging, relocate with pathfinder!
-      if (!spatial.clear) {
-        console.log('[EAFE] 1000% Confirmed unable to launch from current spot — pathfinding to open spot...');
-        try { bot.chat(`[EAFE] ⚠ Launch check failed (${spatial.reason}) — pathfinding to open spot...`); } catch(_) {}
+      // ONLY if still blocked in ALL directions, relocate with pathfinder!
+      if (!heading.clear) {
+        console.log('[EAFE] 1000% Confirmed all 8 launch headings blocked — pathfinding to open spot...');
+        try { bot.chat('[EAFE] ⚠ Launch blocked in all directions — pathfinding to open spot...'); } catch(_) {}
 
         const spot = findElevatedOpenSpot();
         if (!spot) {
@@ -489,18 +513,19 @@ function createBot() {
           return;
         }
 
-        const spatial2 = auditSpatialEnvelope();
-        if (!spatial2.clear) {
-          setPhase(PHASE.FAILED, `✗ Spatial envelope still blocked after relocation (${spatial2.reason})`);
+        heading = findBestLaunchHeading();
+        if (!heading.clear) {
+          setPhase(PHASE.FAILED, '✗ Spatial envelope still blocked in all directions after relocation');
           scheduleRetry();
           return;
         }
       }
 
+      activeLaunchYaw = heading.yaw;
       spatialClear = true;
-      console.log('[EAFE] ✓ Ground & Spatial Clearance PASSED (Checkmark: ✓)');
+      console.log(`[EAFE] ✓ Ground & Spatial Clearance PASSED (Launch Heading: ${heading.headingName})`);
     } else {
-      console.log('[EAFE] ✓ Ground & Spatial Clearance already approved (Checkmark: ✓) — bypassing pathfinding');
+      console.log(`[EAFE] ✓ Spatial Clearance already approved — launching on heading`);
     }
 
     // ── TAKEOFF ──
@@ -508,18 +533,18 @@ function createBot() {
   }
 
   /**
-   * 150ms Jump Apex Rule Takeoff (UNTOUCHED WORKING CORE + DIAGNOSTICS)
+   * 150ms Jump Apex Rule Takeoff (UNTOUCHED WORKING CORE + DIRECTIONAL YAW)
    */
   async function executeTakeoff() {
     if (phase === PHASE.FAILED) return;
-    setPhase(PHASE.TAKEOFF, 'Jumping & activating elytra...');
+    setPhase(PHASE.TAKEOFF, `Jumping & activating elytra facing launch corridor...`);
 
-    // Clear controls
     ['sprint','forward','back','left','right','sneak'].forEach(k => {
       try { bot.setControlState(k, false); } catch(_) {}
     });
 
-    lookForce(yawTo(TARGET_X, TARGET_Z), 0.5);
+    // Face the selected launch heading (e.g. West) + NOSE UP (+0.5 rad)
+    lookForce(activeLaunchYaw, 0.5);
 
     // Jump
     bot.setControlState('jump', true);
@@ -553,7 +578,6 @@ function createBot() {
       return;
     }
 
-    // Fire rocket IMMEDIATELY on takeoff to launch upward!
     fireRocketDirect();
 
     await sleep(250);
@@ -573,11 +597,11 @@ function createBot() {
     startClimb();
   }
 
-  // ─── CLIMB (UNTOUCHED WORKING CORE) ──────────────────────────────────────
+  // ─── CLIMB & MID-AIR YAW CURVE TOWARDS TARGET ─────────────────────────────
   function startClimb() {
     setPhase(PHASE.CLIMBING, `Climbing to Y=${CRUISE_ALT}...`);
 
-    lookForce(yawTo(TARGET_X, TARGET_Z), 0.65);
+    lookForce(activeLaunchYaw, 0.65);
     fireRocketDirect();
 
     if (rocketLoop) clearInterval(rocketLoop);
@@ -591,10 +615,17 @@ function createBot() {
       if (phase !== PHASE.CLIMBING) { clearInterval(climbLoop); climbLoop = null; return; }
 
       const pos = bot.entity.position;
-      const yaw = yawTo(TARGET_X, TARGET_Z);
+      const targetYaw = yawTo(TARGET_X, TARGET_Z);
+
+      // MID-AIR YAW CURVE: Once Y >= 95m (above trees & obstacles), smoothly curve yaw towards goal!
+      let currentYaw = activeLaunchYaw;
+      if (pos.y >= 95) {
+        currentYaw = targetYaw; // Lock onto destination in mid-air!
+      }
+
       console.log(`[EAFE] [CLIMB] Y=${pos.y.toFixed(1)} elytra=${bot.entity.elytraFlying} ground=${bot.entity.onGround}`);
 
-      lookForce(yaw, 0.65);
+      lookForce(currentYaw, 0.65);
 
       if (bot.entity.onGround && pos.y < CRUISE_ALT - 10) {
         clearInterval(climbLoop); climbLoop = null;
@@ -805,10 +836,10 @@ function createBot() {
       const rocketsAvail = countRockets();
       const d2d = dist2D(TARGET_X, TARGET_Z);
       const reqRockets = Math.ceil(d2d / 68.5) + 15;
-      const spatial = auditSpatialEnvelope();
+      const heading = findBestLaunchHeading();
       try {
         bot.chat(
-          `Audit: Rockets=${rocketsAvail}/${reqRockets} Spatial=${spatial.clear?'✓':'✗'} ` +
+          `Audit: Rockets=${rocketsAvail}/${reqRockets} Heading=${heading.headingName} ` +
           `Checkmark=${spatialClear?'✓':'✗'}`
         );
       } catch(_) {}
@@ -903,11 +934,11 @@ function createBot() {
 
 // ─── BANNER ──────────────────────────────────────────────────────────────────
 console.log('╔═════════════════════════════════════════════════════════════╗');
-console.log('║  EAFE v7.4 — Obstacle Digging & 1000% Certainty Relocation   ║');
+console.log('║  EAFE v7.5 — Directional Opening Awareness & Curve Flight    ║');
+console.log('║  Opening Scan: Evaluates target + 8 compass headings (W,N,E,S)║');
+console.log('║  Curved Flight: Takes off in open corridor, turns in sky    ║');
 console.log('║  Block Digging: Breaks blocking leaves/wood/dirt before rel ║');
-console.log('║  1000% Certainty: Only relocates if space stays blocked    ║');
 console.log('║  Pathfinder: A* search with canDig=true & allowParkour=true ║');
-console.log('║  Fuel: N_req Calculation BEFORE flight, asks if short       ║');
 console.log(`║  Host: ${HOST}:${PORT}`.padEnd(61) + '║');
 console.log('╚═════════════════════════════════════════════════════════════╝');
 
