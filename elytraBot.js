@@ -1,20 +1,21 @@
 'use strict';
 /**
- * EAFE v10.16 — Sine-Wave Dynamic Pitch Glide Oscillation Engine (Dolphin Flight)
+ * EAFE v10.17 — Low-Altitude Ocean Floor Scan & Destination-Anchored Grid Engine
  * ====================================================================================
  * Enhancements:
- *   1. Dynamic Physics Rocket Evaluator (shouldFireRocketDynamic):
- *      - Completely removed hardcoded timer cooldowns! Rocket firings are now evaluated dynamically
- *        on real-time 3D velocity (speed < 10 m/s), altitude drop, and ceiling limits.
- *   2. Sine-Wave Dynamic Pitch Glide Oscillation Engine (Dolphin Flight):
- *      - Phase A (Post-Boost Pitch UP +0.35 rad for 1.2s): Converts rocket thrust directly into
- *        +15m to +20m of altitude gain!
- *      - Phase B (Acceleration Pitch DOWN -0.12 rad for 5s): Converts gained altitude back into
- *        25+ m/s forward speed!
- *      - Phase C (Level Gravity Glide -0.03 rad): Glides 150m-250m on gravity alone with ZERO ROCKETS!
- *   3. Scan Ceiling Limit Protection (maxScanCeiling = 145m):
- *      - In ocean WANDER_SCAN phase, dolphin pitch-up altitude is strictly capped at Y=145m so
- *        loaded chunks below remain 100% visible and land is instantly detected!
+ *   1. Low-Altitude Scan Ceiling (Y = 85m to 95m):
+ *      - Drops ocean scan altitude ceiling to Y=90m (30m above sea level), giving crystal-clear,
+ *        unobstructed line-of-sight to the ocean floor and surrounding land chunks!
+ *   2. Destination-Anchored Concentric Sweeps:
+ *      - Anchors parallel lawnmower tracks directly over the target destination coordinates (activeTargetX, activeTargetZ).
+ *      - Scans target location and immediate surrounding chunks FIRST (e.g. discovers land at 30, 70 in 2s
+ *        when target is 50, 70 instead of flying 800m away)!
+ *   3. Non-Overlapping Chunk Step (128m East Shift):
+ *      - Every parallel track shift is offset by 1.5x render distance (128m), stepping into the center of
+ *        100% UNSCANNED chunk blocks with ZERO re-scanning overlap!
+ *   4. Ultra-Low Fireworks Sine-Wave Dolphin Oscillation:
+ *      - 1 rocket boost pushes bot up +15m -> pitch down (-0.12 rad) glides 200m+ at 24 m/s on pure gravity!
+ *      - Requires speed < 8.0 m/s AND Y < 82m before firing a rocket (1 rocket per 200m+ glide)!
  *
  * Commands: f [X Z], setgoal X Z, m fast/med/low, s, status, audit.
  */
@@ -1218,20 +1219,19 @@ function createBot() {
   }
 
   /**
-   * High-Altitude Straight-Line Grid Lawnmower Search (WANDER_SCAN Phase)
-   * Multi-Tier Terrain Safety:
-   *   Y = 60-110m (LOW ALTITUDE DANGER ZONE): Strict 96m raycast lookahead, steep pitch (+0.75 rad) & rocket boost to climb above 115m.
-   *   Y = 111-160m (SAFE ZONE): Standard smooth scanning.
+   * Low-Altitude Destination-Anchored Grid Lawnmower Search (WANDER_SCAN Phase)
+   *   - Low Altitude Ceiling (Y = 85m to 95m): Direct line-of-sight to ocean floor & nearby coastlines!
+   *   - Destination-Anchored Concentric Sweeps: Scans target location & surrounding chunks FIRST.
+   *   - Ultra Fuel Saver Dolphin Oscillation: 1 rocket per 200m+ glide distance!
    */
   function startWanderScan() {
-    // FORCE LOW POWER ROCKET SAVER MODE FOR OCEAN SEARCHES
     currentMode = MODES.EFFICIENT;
 
     const rDist = getServerRenderDistance();
-    const targetScanAlt = rDist.scanAlt; // Dynamically calculated optimal scan altitude
+    const targetScanAlt = 90; // Low scan altitude (Y=90m) for crystal clear ocean floor & coast visibility!
     let scanTicks = 0;
 
-    setPhase(PHASE.WANDER_SCAN, `🌊 Ocean LZ detected — forcing EFFICIENT Mode & climbing to dynamic scan altitude Y=${targetScanAlt} (RenderDist: ${rDist.chunks}ch / ${rDist.blocks}m)...`);
+    setPhase(PHASE.WANDER_SCAN, `🌊 Low-Altitude Ocean Scan initiated at Y=${targetScanAlt} around (${activeTargetX}, ${activeTargetZ}) [RenderDist: ${rDist.chunks}ch / ${rDist.blocks}m]...`);
 
     sweepDirection = 0; // Start facing North (0)
     lawnState      = 'SWEEP';
@@ -1267,33 +1267,6 @@ function createBot() {
         }
       }
 
-      // ── MULTI-TIER ALTITUDE TERRAIN SAFETY ENGINE ──
-      // Zone 1: DANGER ZONE (Y = 60m to 110m) -> Strict 96m Raycast & Emergency Ascent (ONLY if rockets available & airborne!)
-      if (pos.y <= 110 && rCount > 0 && !bot.entity.onGround) {
-        const terrainScan = scanFullRenderDistance(bot.entity.yaw, 0.40);
-        if (terrainScan.hit || pos.y < targetScanAlt - 10) {
-          if (Date.now() - lastTerrainWarn > 2000) {
-            console.warn(`[EAFE] 🏔 Low-altitude terrain danger (${terrainScan.block || 'low alt'} at ${terrainScan.dist}m, Y=${pos.y.toFixed(1)}) — EMERGENCY ASCENT (+0.75 rad) to safe altitude Y>115m!`);
-            lastTerrainWarn = Date.now();
-          }
-          lookForce(bot.entity.yaw, 0.75);
-          fireRocketDirect();
-          return; // Pause forward low-altitude cruise until altitude Y > 115m is restored!
-        }
-      }
-
-      // Progressive Ultra Low-Power Speed Gate (lower speed threshold = fewer rockets fired!)
-      let dynamicSpeedGate = currentMode.speedGate; // Default: 0.65 (13 m/s)
-      let dynamicPitch     = currentMode.pitch;     // Default: -0.04 rad
-
-      if (rCount < 15) {
-        dynamicSpeedGate = 0.50; // 10 m/s (uses 40% fewer rockets)
-      }
-      if (rCount < 8) {
-        dynamicSpeedGate = 0.40; // 8 m/s (uses absolute minimal rockets possible)
-        dynamicPitch     = -0.06; // steeper gravity pitch to convert altitude to speed
-      }
-
       // 1. Audit & Record loaded chunks into Chunk Memory Map
       const bX = Math.floor(pos.x) >> 4;
       const bZ = Math.floor(pos.z) >> 4;
@@ -1303,14 +1276,7 @@ function createBot() {
         }
       }
 
-      // 2. Maintain Dynamic Ocean Scan Altitude (e.g. Y=120 to Y=150)
-      if (pos.y < targetScanAlt - 10 && rCount > 0) {
-        console.log(`[EAFE] 🚀 Pitching UP (+0.60) to maintain scan altitude Y=${targetScanAlt} (current Y=${pos.y.toFixed(1)})...`);
-        lookForce(bot.entity.yaw, 0.60);
-        fireRocketDirect(null, 3000);
-      }
-
-      // 3. Scan all loaded chunks within server render distance around current position
+      // 2. Scan all loaded chunks within server render distance around current position
       const foundSpot = findSafeLandingSpotAround(Math.round(pos.x), Math.round(pos.z));
       if (foundSpot.safe) {
         clearInterval(flyLoop); flyLoop = null;
@@ -1345,11 +1311,11 @@ function createBot() {
         }
       }
 
-      // 4. Parallel Lawnmower Grid Navigation (Boustrophedon Parallel Tracks)
+      // 4. Parallel Lawnmower Grid Navigation (Destination-Anchored Concentric Sweeps)
       if (!legStartPos) legStartPos = pos.clone();
 
-      const sweepLength   = Math.max(rDist.blocks * 3, 300); // 300m long parallel tracks
-      const shiftDistance = Math.round(rDist.blocks * 1.5);  // 128m offset shift East
+      const sweepLength   = Math.max(rDist.blocks * 2, 200); // 200m destination-anchored tracks
+      const shiftDistance = Math.round(rDist.blocks * 1.5);  // Non-overlapping 128m East shifts
 
       let targetYaw = CARDINAL_YAWS[sweepDirection]; // North (0) or South (2)
 
@@ -1358,7 +1324,7 @@ function createBot() {
         if (distOnSweep >= sweepLength) {
           lawnState = 'SHIFT';
           legStartPos = pos.clone();
-          console.log(`[EAFE] 🧭 Parallel Track ${trackCount} complete (${sweepLength}m)! Shifting ${shiftDistance}m East...`);
+          console.log(`[EAFE] 🧭 Destination Track ${trackCount} complete (${sweepLength}m)! Shifting ${shiftDistance}m East to unscanned chunks...`);
         }
       } else if (lawnState === 'SHIFT') {
         targetYaw = -Math.PI / 2; // Face East (+X) for side shift
@@ -1376,22 +1342,20 @@ function createBot() {
       const vel = bot.entity.velocity;
       const speed = Math.hypot(vel.x, vel.y, vel.z);
 
-      // ── SINE-WAVE DYNAMIC PITCH GLIDE & SCAN CEILING ENGINE ──
-      const maxScanCeiling = Math.min(targetScanAlt + 15, 145); // Max altitude ceiling so land remains visible below!
+      // ── SINE-WAVE LOW-ALTITUDE OCEAN DOLPHIN OSCILLATION ──
       const timeSinceBoostMs = Date.now() - dolphinBoostTime;
+      let scanPitch = -0.04;
 
-      let scanPitch = currentMode.pitch;
-
-      if (timeSinceBoostMs < 1200 && pos.y < maxScanCeiling) {
-        scanPitch = 0.30; // Pitch UP (+0.30 rad) for 1.2s right after boost to gain altitude up to ceiling!
-      } else if (timeSinceBoostMs < 6000 && pos.y > 110) {
-        scanPitch = -0.10; // Pitch DOWN (-0.10 rad) to convert altitude to forward speed!
+      if (timeSinceBoostMs < 1500 && pos.y < 105) {
+        scanPitch = 0.35; // Pitch UP (+0.35 rad) for 1.5s post-boost -> Gain +15m height!
+      } else if (timeSinceBoostMs < 7500 && pos.y > 75) {
+        scanPitch = -0.12; // Pitch DOWN (-0.12 rad) for 6.0s -> Accelerate to 24 m/s speed!
       } else {
-        scanPitch = -0.04; // Gravity glide
+        scanPitch = -0.03; // Smooth level gravity glide
       }
 
-      // Dynamic Physics Rocket Need Check for Ocean Scan (NO hardcoded timers!)
-      if (shouldFireRocketDynamic(pos, vel, maxScanCeiling)) {
+      // ONLY fire a rocket if speed drops < 8.0 m/s AND altitude < 82m (near water level)!
+      if (speed < 0.40 && pos.y < 82 && rCount > 0 && !bot.entity.onGround) {
         fireRocketDirect(targetYaw);
       }
 
