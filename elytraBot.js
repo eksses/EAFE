@@ -1,18 +1,20 @@
 'use strict';
 /**
- * EAFE v10.11 — Multi-Tier Altitude Terrain Safety Engine & Loop Prevention
+ * EAFE v10.12 — Touchdown Recognition Failsafe & Hazard Classification
  * ====================================================================================
  * Enhancements:
- *   1. Multi-Tier Altitude Terrain Safety Engine (Low vs High Altitude Protection):
- *      - Zone 1: DANGER ZONE (Y = 60m to 110m): Strict 96m raycast lookahead. If ANY obstacle/terrain
- *        is detected ahead at low altitude, IMMEDIATELY triggers EMERGENCY ASCENT (+0.75 rad pitch)
- *        and rocket boost to climb above Y > 115m! The bot will never cruise or collide with low-altitude obstacles.
- *      - Zone 2: SAFE ZONE (Y = 111m to 180m): Standard smooth cruising & scanning.
- *   2. LANDING <-> WANDER_SCAN Ping-Pong Loop Fix:
- *      - Fixed 200ms re-entry loop by delaying 10% Backtrack Lock check until after 5s of goal scanning
- *        and preventing redundant startWanderScan() re-invocations when already in WANDER_SCAN phase.
- *   3. Strict <= 10 Durability Elytra Auto-Swap Rule:
- *      - Swaps Elytra ONLY when equipped durability reaches <= 10 points.
+ *   1. Touchdown Recognition Failsafe (WANDER_SCAN Phase):
+ *      - Audits bot.entity.onGround and checks if the standing surface is a valid solid safe block
+ *        (isSafeSolidBlock). When touchdown on solid ground occurs (even with 0 rockets),
+ *        immediately halts scanning, stops flyLoop timers, and logs clean touchdown!
+ *   2. Hazardous vs Safe Block Classification:
+ *      - Defined HAZARD_SURFACES: water, flowing_water, lava, flowing_lava, magma_block, fire, cactus.
+ *      - Defined isSafeSolidBlock: ALL non-hazardous solid surfaces (grass, stone, sand, gravel, wood, etc.)
+ *        are recognized as 100% safe landing blocks!
+ *   3. Multi-Tier Altitude Terrain Safety Engine:
+ *      - Low Altitude Zone (Y=60-110m): 96m raycast lookahead & emergency ascent (+0.75 rad pitch).
+ *        Disabled when onGround=true or rockets=0 to allow smooth unpowered glide touchdown.
+ *   4. Strict <= 10 Durability Elytra Auto-Swap Threshold Rule.
  *
  * Commands: f [X Z], setgoal X Z, m fast/med/low, s, status, audit.
  */
@@ -72,7 +74,13 @@ const PHASE = {
   FAILED:      'FAILED',       // flight failed, auto-retry scheduled
 };
 
-// Whitelisted safe landing & launch surfaces (STRICT: NO WATER, NO LAVA)
+// Hazardous surfaces that can hurt or drown the bot
+const HAZARD_SURFACES = new Set([
+  'water', 'flowing_water', 'lava', 'flowing_lava', 'magma_block',
+  'fire', 'soul_fire', 'sweet_berry_bush', 'cactus', 'powder_snow'
+]);
+
+// Whitelisted safe landing & launch surfaces (STRICT: NO WATER, NO LAVA, NO MAGMA)
 const SAFE_SURFACES = new Set([
   'grass_block', 'dirt', 'coarse_dirt', 'podzol', 'stone', 'cobblestone',
   'smooth_stone', 'granite', 'diorite', 'andesite', 'sand', 'red_sand',
@@ -80,6 +88,17 @@ const SAFE_SURFACES = new Set([
   'oak_planks', 'spruce_planks', 'birch_planks', 'jungle_planks', 'acacia_planks',
   'dark_oak_planks', 'stone_bricks', 'deepslate', 'terracotta', 'concrete'
 ]);
+
+function isHazardousBlock(block) {
+  if (!block) return true; // Missing block = unknown hazard
+  if (HAZARD_SURFACES.has(block.name)) return true;
+  return block.name.includes('water') || block.name.includes('lava') || block.name.includes('magma');
+}
+
+function isSafeSolidBlock(block) {
+  if (!block || isAir(block) || isHazardousBlock(block)) return false;
+  return true; // Any solid, non-hazardous block is safe!
+}
 
 // Cardinal Yaw Directions for Straight-Line Grid Flying
 const CARDINAL_YAWS = [
@@ -98,8 +117,7 @@ function isAir(block) {
 }
 
 function isWaterOrLava(block) {
-  if (!block) return false;
-  return block.name.includes('water') || block.name.includes('lava');
+  return isHazardousBlock(block);
 }
 
 function angleDiff(a, b) {
@@ -1125,9 +1143,26 @@ function createBot() {
       // Mid-flight Elytra Auto-Swap check
       checkMidFlightElytraSwap();
 
+      // 0. TOUCHDOWN RECOGNITION FAILSAFE: Check if bot has safely landed on solid ground
+      if (bot.entity.onGround) {
+        const groundUnder = getGroundBlockAt(Math.round(pos.x), Math.round(pos.z));
+        if (groundUnder && isSafeSolidBlock(groundUnder)) {
+          clearInterval(flyLoop); flyLoop = null;
+          clearInterval(verifyLoop); verifyLoop = null;
+          retries = 0;
+          spatialClear = false;
+
+          const rRem = countRockets();
+          const landingMsg = `✅ Destination Reached! Arrived safely at (${Math.round(pos.x)}, ${Math.round(pos.y)}, ${Math.round(pos.z)}) on ${groundUnder.name} | Scanned chunks: ${scannedChunks.size} | Rockets remaining: ${rRem}`;
+          setPhase(PHASE.IDLE, landingMsg);
+          try { bot.chat(`[EAFE] ${landingMsg}`); } catch(_) {}
+          return;
+        }
+      }
+
       // ── MULTI-TIER ALTITUDE TERRAIN SAFETY ENGINE ──
-      // Zone 1: DANGER ZONE (Y = 60m to 110m) -> Strict 96m Raycast & Emergency Ascent
-      if (pos.y <= 110) {
+      // Zone 1: DANGER ZONE (Y = 60m to 110m) -> Strict 96m Raycast & Emergency Ascent (ONLY if rockets available & airborne!)
+      if (pos.y <= 110 && rCount > 0 && !bot.entity.onGround) {
         const terrainScan = scanFullRenderDistance(bot.entity.yaw, 0.40);
         if (terrainScan.hit || pos.y < targetScanAlt - 10) {
           if (Date.now() - lastTerrainWarn > 2000) {
@@ -1135,7 +1170,7 @@ function createBot() {
             lastTerrainWarn = Date.now();
           }
           lookForce(bot.entity.yaw, 0.75);
-          if (rCount > 0) fireRocketDirect();
+          fireRocketDirect();
           return; // Pause forward low-altitude cruise until altitude Y > 115m is restored!
         }
       }
