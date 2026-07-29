@@ -1,19 +1,15 @@
 'use strict';
 /**
- * EAFE v10.18 — 3-Layer Dynamic Terrain Safety & Adaptive Clearance Engine
+ * EAFE v10.19 — Optimal Aerodynamic L/D Glide Ratio Engine (+0.15 / -0.04 rad)
  * ====================================================================================
  * Enhancements:
- *   1. 3-Layer Dynamic Terrain Safety & Collision Avoidance Engine:
- *      - Layer 1 (128m Raycast Lookahead): Scans 128m ahead along flight yaw. If any hill, cliff, mountain,
- *        tree, or structure is detected within 80m, IMMEDIATELY engages EMERGENCY ASCENT (+0.65 rad pitch)
- *        and rocket boost to fly smoothly OVER the obstacle!
- *      - Layer 2 (Adaptive Terrain Floor Elevation Clearance): Dynamically tracks ground height under and ahead of
- *        the bot (groundY). Automatically maintains a minimum 20m safety clearance buffer above ground floor (Y >= groundY + 20).
- *      - Layer 3 (Wall Stall & Touchdown Failsafe): Touchdown on solid non-hazard blocks halts scan immediately.
- *   2. Low-Altitude Ocean Scan (Y = 85m to 95m):
- *      - Provides direct, unobstructed line-of-sight to ocean floor & surrounding land chunks over open water.
- *   3. Destination-Anchored Concentric Sweeps:
- *      - Scans target destination & surrounding chunks FIRST before expanding outward.
+ *   1. Optimal Aerodynamic L/D Glide Ratio Pitch Adjustment:
+ *      - Replaced steep pitch turns (+0.35 / -0.12 rad) with gentle, aerodynamic micro-adjustments:
+ *        * Post-Boost Micro-Climb: Gentle +0.15 rad (+8.5°) for 1.0s to convert thrust into smooth altitude.
+ *        * Optimal L/D Gravity Glide: -0.04 rad (-2.3°) for maximum distance-to-speed ratio!
+ *      - Provides ultra-smooth, horizontal, near-flat flight with ZERO sudden speed drops or steep dives!
+ *   2. 3-Layer Dynamic Terrain Safety Engine (128m Raycast + Adaptive Clearance).
+ *   3. Low-Altitude Ocean Scan (Y = 85m to 95m) & Destination-Anchored Grid Engine.
  *
  * Commands: f [X Z], setgoal X Z, m fast/med/low, s, status, audit.
  */
@@ -1050,20 +1046,17 @@ function createBot() {
       const yaw = yawTo(activeTargetX, activeTargetZ);
       const vel = bot.entity.velocity;
 
-      // ── SINE-WAVE DYNAMIC PITCH GLIDE OSCILLATION ENGINE ──
+      // ── OPTIMAL AERODYNAMIC L/D GLIDE ENGINE (Ultra-Smooth Speed-to-Distance Ratio) ──
       const timeSinceBoostMs = Date.now() - dolphinBoostTime;
       let cruisePitch = (phase === PHASE.DEAD_STICK) ? 0.02 : currentMode.pitch;
 
       if (phase === PHASE.CRUISING) {
-        if (timeSinceBoostMs < 1200) {
-          // Phase A: Post-Boost Climb Pitch (+0.35 rad) -> Convert rocket thrust to +15-20m altitude!
-          cruisePitch = 0.35;
-        } else if (timeSinceBoostMs < 6500 && pos.y > 95) {
-          // Phase B: Acceleration Dive Pitch (-0.12 rad) -> Convert altitude gain to 25+ m/s forward speed!
-          cruisePitch = -0.12;
+        if (timeSinceBoostMs < 1000) {
+          // Phase A: Gentle Post-Boost Micro-Climb (+0.15 rad) -> Smoothly converts thrust to altitude without speed drop!
+          cruisePitch = 0.15;
         } else {
-          // Phase C: Level Glide Pitch (-0.03 rad) -> Smooth long-distance gravity glide!
-          cruisePitch = -0.03;
+          // Phase B: Optimal L/D Gravity Glide (-0.04 rad) -> Maximum distance-to-speed ratio!
+          cruisePitch = -0.04;
         }
 
         // Dynamic Physics Rocket Need Check (No hardcoded timers!)
@@ -1365,16 +1358,14 @@ function createBot() {
       const vel = bot.entity.velocity;
       const speed = Math.hypot(vel.x, vel.y, vel.z);
 
-      // ── SINE-WAVE LOW-ALTITUDE OCEAN DOLPHIN OSCILLATION ──
+      // ── OPTIMAL AERODYNAMIC L/D GLIDE ENGINE (Ultra-Smooth Speed-to-Distance Ratio) ──
       const timeSinceBoostMs = Date.now() - dolphinBoostTime;
       let scanPitch = -0.04;
 
-      if (timeSinceBoostMs < 1500 && pos.y < 105) {
-        scanPitch = 0.35; // Pitch UP (+0.35 rad) for 1.5s post-boost -> Gain +15m height!
-      } else if (timeSinceBoostMs < 7500 && pos.y > 75) {
-        scanPitch = -0.12; // Pitch DOWN (-0.12 rad) for 6.0s -> Accelerate to 24 m/s speed!
+      if (timeSinceBoostMs < 1000 && pos.y < 100) {
+        scanPitch = 0.15; // Gentle Post-Boost Micro-Climb (+0.15 rad) -> Smooth height gain without stalling!
       } else {
-        scanPitch = -0.03; // Smooth level gravity glide
+        scanPitch = -0.04; // Optimal L/D Gravity Glide (-0.04 rad) -> Maximum distance per rocket!
       }
 
       // ONLY fire a rocket if speed drops < 8.0 m/s AND altitude < 82m (near water level)!
