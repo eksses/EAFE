@@ -1,15 +1,16 @@
 'use strict';
 /**
- * EAFE v10.19 — Optimal Aerodynamic L/D Glide Ratio Engine (+0.15 / -0.04 rad)
+ * EAFE v10.20 — ReferenceError Fix & Aerodynamic L/D Glide Engine
  * ====================================================================================
  * Enhancements:
- *   1. Optimal Aerodynamic L/D Glide Ratio Pitch Adjustment:
- *      - Replaced steep pitch turns (+0.35 / -0.12 rad) with gentle, aerodynamic micro-adjustments:
- *        * Post-Boost Micro-Climb: Gentle +0.15 rad (+8.5°) for 1.0s to convert thrust into smooth altitude.
- *        * Optimal L/D Gravity Glide: -0.04 rad (-2.3°) for maximum distance-to-speed ratio!
- *      - Provides ultra-smooth, horizontal, near-flat flight with ZERO sudden speed drops or steep dives!
- *   2. 3-Layer Dynamic Terrain Safety Engine (128m Raycast + Adaptive Clearance).
- *   3. Low-Altitude Ocean Scan (Y = 85m to 95m) & Destination-Anchored Grid Engine.
+ *   1. Fixed ReferenceError in startWanderScan:
+ *      - Calculated currentTrackYaw before terrain scan reference to prevent Temporal Dead Zone ReferenceError.
+ *   2. Optimal Aerodynamic L/D Glide Ratio Pitch Adjustment (+0.15 / -0.04 rad):
+ *      - Post-Boost Micro-Climb: Gentle +0.15 rad (+8.5°) for 1.0s to convert thrust into smooth altitude.
+ *      - Optimal L/D Gravity Glide: -0.04 rad (-2.3°) for maximum distance-to-speed ratio!
+ *      - Ultra-smooth, horizontal, near-flat flight with ZERO sudden speed drops or steep dives.
+ *   3. 3-Layer Dynamic Terrain Safety Engine (128m Raycast + Adaptive Clearance).
+ *   4. Low-Altitude Ocean Scan (Y = 85m to 95m) & Destination-Anchored Grid Engine.
  *
  * Commands: f [X Z], setgoal X Z, m fast/med/low, s, status, audit.
  */
@@ -1260,7 +1261,8 @@ function createBot() {
 
       // ── DYNAMIC TERRAIN SAFETY & COLLISION AVOIDANCE ENGINE ──
       // 1. Raycast Obstacle Scan (128m lookahead along flight yaw)
-      const scanHeading = targetYaw ?? bot.entity.yaw;
+      const currentTrackYaw = (lawnState === 'SHIFT') ? (-Math.PI / 2) : CARDINAL_YAWS[sweepDirection];
+      const scanHeading = currentTrackYaw ?? bot.entity.yaw;
       const terrainScan = scanFullRenderDistance(scanHeading, 0.20);
       const groundUnder = getGroundBlockAt(Math.round(pos.x), Math.round(pos.z));
       const groundY = groundUnder?.position?.y ?? 60;
