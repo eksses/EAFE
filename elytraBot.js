@@ -1,22 +1,22 @@
 'use strict';
 /**
- * EAFE v9.1 — 100% Correct Minecraft Yaw Engine & Periodic Course Checker
+ * EAFE v9.2 — Best Elytra Auto-Swap Engine & Rate-Limited Terrain Warnings
  * ============================================================================
- * Fixes & Enhancements:
- *   1. Corrected Mineflayer Yaw Convention (yawTo):
- *      - Formula: Math.atan2(-(targetX - posX), -(targetZ - posZ))
- *      - Fixes the 180° inverted yaw bug that previously sent the bot flying
- *        North (-Z) instead of South (+Z).
- *      - Verified Cardinal Outputs:
- *        South (+Z) = 0°, North (-Z) = 180°, East (+X) = 270°, West (-X) = 90°.
- *   2. Periodic 2-Second Course & Distance Verification:
- *      - Measures current distance to target every 2 seconds.
- *      - If distance increases (bot drifting away), logs warning and forces
- *        immediate yaw re-alignment towards (TARGET_X, TARGET_Z).
- *   3. Bulletproof Rocket Failsafe Engine:
- *      - Verifies bot is facing target within 15° before firing any rocket.
- *      - Verifies elytraFlying = true and off-hand rocket (slot 45) equipped.
- *   4. Three Selectable Flight Modes (FAST, MEDIUM, EFFICIENT):
+ * Enhancements:
+ *   1. Best Elytra Auto-Swap Engine (auditAndEquipElytra):
+ *      - Scans ALL inventory slots + equipped chest slot (slot 6).
+ *      - Finds the Elytra with the HIGHEST durability remaining in inventory.
+ *      - Automatically equips/swaps to the highest durability Elytra before flight!
+ *   2. Detailed Elytra Durability & Inventory Diagnostics:
+ *      - Reports exact durability points (e.g. 400/432) and spare count in status/audit commands.
+ *      - Asks in chat if Elytra health ≤ 15 points.
+ *   3. Throttled Terrain Obstacle Warnings:
+ *      - Rate-limits 128m terrain warnings to max once every 3.0s to prevent console spam.
+ *   4. Correct Mineflayer Yaw Navigation (yawTo):
+ *      - Math.atan2(-(x - px), -(z - pz)) for 100% accurate South (+Z) navigation.
+ *   5. Periodic 2-Second Distance & Course Checker:
+ *      - Alarms and re-aligns if distance increases during flight.
+ *   6. Three Selectable Flight Modes (FAST, MEDIUM, EFFICIENT):
  *      - FAST: Pitch +0.02, Speed Gate < 1.5 b/t (30m/s), Fuel d2d/35.0
  *      - MEDIUM: Pitch +0.05, Speed Gate < 1.1 b/t (22m/s), Fuel d2d/65.0
  *      - EFFICIENT: Pitch +0.08, Speed Gate < 0.7 b/t (14m/s), Fuel d2d/110.0
@@ -118,6 +118,7 @@ function createBot() {
   let retries         = 0;
   let spatialClear    = false;        // Checkmark flag for ground clearance
   let activeLaunchYaw = 0;            // Selected takeoff heading
+  let lastTerrainWarn = 0;            // Rate-limiter timestamp for terrain warnings
   let physEngine      = null;
   let flyLoop         = null;
   let verifyLoop      = null;
@@ -203,47 +204,90 @@ function createBot() {
     }
   }
 
+  // ─── Best Elytra Auto-Swap Engine ──────────────────────────────────────────
   /**
-   * Elytra Durability & Auto-HotSwap Audit
+   * Scans all slots (including equipped slot 6) and automatically equips the
+   * Elytra with the HIGHEST remaining durability!
    */
   async function auditAndEquipElytra() {
+    let bestSlot = null;
+    let bestDur  = -1;
+
+    // Check equipped chest slot (slot 6)
     const chest = bot.inventory.slots[6];
     if (chest?.name === 'elytra') {
-      const dur = chest.maxDurability ? (chest.maxDurability - chest.durabilityUsed) : 400;
-      if (dur > 15) {
-        console.log(`[EAFE] ✓ Elytra equipped (durability: ${dur})`);
-        return true;
+      const dur = chest.maxDurability ? (chest.maxDurability - chest.durabilityUsed) : 432;
+      bestSlot = 6;
+      bestDur  = dur;
+    }
+
+    // Check all inventory slots for a higher durability Elytra
+    for (let s = 0; s <= 45; s++) {
+      const item = bot.inventory.slots[s];
+      if (item && item.name === 'elytra') {
+        const dur = item.maxDurability ? (item.maxDurability - item.durabilityUsed) : 432;
+        if (dur > bestDur) {
+          bestDur  = dur;
+          bestSlot = s;
+        }
       }
-      console.warn(`[EAFE] ⚠ Equipped Elytra durability low (${dur} points) — looking for spare...`);
     }
 
-    const spare = bot.inventory.items().find(i => {
-      if (i.name !== 'elytra') return false;
-      const dur = i.maxDurability ? (i.maxDurability - i.durabilityUsed) : 400;
-      return dur > 15;
-    });
-
-    if (!spare) {
-      console.warn('[EAFE] ⚠ No usable Elytra (durability > 15) found in inventory');
+    if (bestSlot === null || bestDur <= 15) {
+      console.warn(`[EAFE] ⚠ No usable Elytra found (durability > 15). Highest available: ${bestDur > 0 ? bestDur : 0}/432`);
+      try {
+        bot.chat(`[EAFE] ⚠ Elytra health critical! Highest: ${bestDur > 0 ? bestDur : 0}/432 points. Please give me a fresh Elytra!`);
+      } catch(_) {}
       return false;
     }
 
-    try {
-      await bot.equip(spare, 'torso');
-      console.log('[EAFE] 🎽 Fresh Elytra equipped to chest slot');
-      try { bot.chat('[EAFE] ✓ Fresh Elytra equipped!'); } catch(_) {}
-      return true;
-    } catch(e) {
-      console.error('[EAFE] ✗ Equip elytra failed:', e.message);
-      return false;
+    // If highest durability Elytra is in inventory (not chest slot 6), auto-swap to it!
+    if (bestSlot !== 6) {
+      const spareItem = bot.inventory.slots[bestSlot];
+      try {
+        await bot.equip(spareItem, 'torso');
+        console.log(`[EAFE] 🎽 Auto-swapped to best Elytra from slot ${bestSlot} (Durability: ${bestDur}/432)`);
+        try { bot.chat(`[EAFE] 🎽 Auto-swapped to best Elytra (${bestDur}/432 durability)`); } catch(_) {}
+      } catch(e) {
+        console.error('[EAFE] ✗ Equip best elytra failed:', e.message);
+        return false;
+      }
+    } else {
+      console.log(`[EAFE] ✓ Equipped Elytra is optimal (Durability: ${bestDur}/432)`);
     }
+
+    return true;
+  }
+
+  /**
+   * Summary diagnostics of all Elytras in inventory & equipment
+   */
+  function getElytraSummary() {
+    let count = 0;
+    let equippedDur = 0;
+    let maxDur = 0;
+
+    const chest = bot.inventory.slots[6];
+    if (chest?.name === 'elytra') {
+      equippedDur = chest.maxDurability ? (chest.maxDurability - chest.durabilityUsed) : 432;
+      count++;
+      if (equippedDur > maxDur) maxDur = equippedDur;
+    }
+
+    for (let s = 0; s <= 45; s++) {
+      if (s === 6) continue;
+      const item = bot.inventory.slots[s];
+      if (item && item.name === 'elytra') {
+        const dur = item.maxDurability ? (item.maxDurability - item.durabilityUsed) : 432;
+        count++;
+        if (dur > maxDur) maxDur = dur;
+      }
+    }
+
+    return { count, equippedDur, maxDur };
   }
 
   // ─── Mineflayer Navigation Helpers (CORRECTED YAW FORMULA) ───────────────────
-  /**
-   * Calculates exact Mineflayer yaw towards target (x, z)
-   * Formula: Math.atan2(-(x - px), -(z - pz))
-   */
   function yawTo(x, z) {
     const p = bot.entity.position;
     return Math.atan2(-(x - p.x), -(z - p.z));
@@ -396,8 +440,7 @@ function createBot() {
   }
 
   /**
-   * Directional Opening Awareness Scan (Corrected Compass Definitions)
-   * South (0°)=0, West (270°)=+π/2, North (180°)=π, East (90°)=-π/2
+   * Directional Opening Awareness Scan
    */
   function findBestLaunchHeading() {
     const targetYaw = yawTo(TARGET_X, TARGET_Z);
@@ -525,7 +568,7 @@ function createBot() {
 
     setPhase(PHASE.AUDIT, `Running pre-flight inventory, fuel & spatial audit [Mode: ${currentMode.name}]...`);
 
-    // 1. Elytra durability audit
+    // 1. Best Elytra auto-swap audit
     const elytraOk = await auditAndEquipElytra();
     if (!elytraOk) {
       setPhase(PHASE.FAILED, '✗ Pre-flight failed: No usable Elytra (durability > 15)');
@@ -541,7 +584,11 @@ function createBot() {
     const startY = bot.entity.position.y;
     const reqRockets = calculateRequiredRockets(d2d, CRUISE_ALT - startY);
 
-    console.log(`[EAFE] 🎆 Firework Audit [Mode=${currentMode.name}]: Available=${rocketsAvail} | Required=${reqRockets} (dist=${d2d.toFixed(0)}m)`);
+    const elytraInfo = getElytraSummary();
+    console.log(
+      `[EAFE] 🎆 Pre-Flight Audit [Mode=${currentMode.name}]: ` +
+      `Rockets=${rocketsAvail}/${reqRockets} | Elytra Durability=${elytraInfo.equippedDur}/432 (${elytraInfo.count} available)`
+    );
 
     if (rocketsAvail < reqRockets) {
       const needed = reqRockets - rocketsAvail;
@@ -689,11 +736,14 @@ function createBot() {
         currentYaw = targetYaw;
       }
 
-      // 128m Full Render Distance Raycast Scan
+      // 128m Full Render Distance Raycast Scan (Throttled log)
       let climbPitch = 0.65;
       const terrainScan = scanFullRenderDistance(currentYaw, climbPitch);
       if (terrainScan.hit) {
-        console.warn(`[EAFE] 🏔 Terrain obstacle (${terrainScan.block}) detected at ${terrainScan.dist}m — steepening climb pitch (+0.75 rad)`);
+        if (Date.now() - lastTerrainWarn > 3000) {
+          console.warn(`[EAFE] 🏔 Terrain obstacle (${terrainScan.block}) detected at ${terrainScan.dist}m — steepening climb pitch (+0.75 rad)`);
+          lastTerrainWarn = Date.now();
+        }
         climbPitch = 0.75;
         fireRocketDirect();
       }
@@ -762,10 +812,13 @@ function createBot() {
 
       let cruisePitch = (phase === PHASE.DEAD_STICK) ? 0.02 : currentMode.pitch;
 
-      // 128m Full Render Distance Raycast Scan
+      // 128m Full Render Distance Raycast Scan (Throttled log)
       const terrainScan = scanFullRenderDistance(yaw, cruisePitch);
       if (terrainScan.hit && terrainScan.dist < 60) {
-        console.warn(`[EAFE] 🏔 Terrain obstacle (${terrainScan.block}) ahead at ${terrainScan.dist}m — pitching UP to climb over`);
+        if (Date.now() - lastTerrainWarn > 3000) {
+          console.warn(`[EAFE] 🏔 Terrain obstacle (${terrainScan.block}) ahead at ${terrainScan.dist}m — pitching UP to climb over`);
+          lastTerrainWarn = Date.now();
+        }
         cruisePitch = 0.55;
         if (countRockets() > 0) fireRocketDirect(yaw);
       }
@@ -796,10 +849,11 @@ function createBot() {
         lookForce(targetYaw, currentMode.pitch);
       }
 
+      const elytraInfo = getElytraSummary();
       console.log(
         `[EAFE] [2s Check] pos=(${pos.x.toFixed(1)}, ${pos.y.toFixed(1)}, ${pos.z.toFixed(1)}) ` +
         `speed=${(Math.hypot(bot.entity.velocity.x, bot.entity.velocity.y, bot.entity.velocity.z)*20).toFixed(1)}m/s ` +
-        `dist=${curDist.toFixed(0)}m rockets=${countRockets()} headingError=${(angleDiff(bot.entity.yaw, targetYaw)*180/Math.PI).toFixed(1)}°`
+        `dist=${curDist.toFixed(0)}m rockets=${countRockets()} elytraDur=${elytraInfo.equippedDur}/432`
       );
 
       if (!isFlying() && !bot.entity.onGround) {
@@ -932,10 +986,11 @@ function createBot() {
 
     } else if (cmd === 'status') {
       const p = bot.entity.position;
+      const elytraInfo = getElytraSummary();
       try {
         bot.chat(
           `phase=${phase} mode=${currentMode.name} pos=(${p.x.toFixed(0)},${p.y.toFixed(0)},${p.z.toFixed(0)}) ` +
-          `elytra=${bot.entity.elytraFlying} ground=${bot.entity.onGround} ` +
+          `elytra=${bot.entity.elytraFlying} elytraHealth=${elytraInfo.equippedDur}/432 ` +
           `rockets=${countRockets()} spatialClear=${spatialClear?'✓':'✗'} dist=${dist2D().toFixed(0)}m`
         );
       } catch(_) {}
@@ -945,10 +1000,11 @@ function createBot() {
       const d2d = dist2D(TARGET_X, TARGET_Z);
       const reqRockets = calculateRequiredRockets(d2d, CRUISE_ALT - bot.entity.position.y);
       const heading = findBestLaunchHeading();
+      const elytraInfo = getElytraSummary();
       try {
         bot.chat(
-          `Audit [${currentMode.name}]: Rockets=${rocketsAvail}/${reqRockets} Heading=${heading.headingName} ` +
-          `Checkmark=${spatialClear?'✓':'✗'}`
+          `Audit [${currentMode.name}]: Rockets=${rocketsAvail}/${reqRockets} ElytraDur=${elytraInfo.equippedDur}/432 ` +
+          `Heading=${heading.headingName} Checkmark=${spatialClear?'✓':'✗'}`
         );
       } catch(_) {}
     }
@@ -996,9 +1052,10 @@ function createBot() {
       auditAndEquipElytra().then(ok => {
         autoEquipRocket().then(() => {
           const count = countRockets();
-          console.log(`[EAFE] Inventory audit: elytra=${ok} rockets=${count} mode=${currentMode.name}`);
+          const elytraInfo = getElytraSummary();
+          console.log(`[EAFE] Inventory audit: elytra=${ok} (${elytraInfo.equippedDur}/432) rockets=${count} mode=${currentMode.name}`);
           try {
-            bot.chat(`[EAFE] Ready  Mode:${currentMode.name}  Elytra:${ok ? '✓' : '✗'}  Rockets:${count}  |  f=fly  m fast/med/low  s=stop`);
+            bot.chat(`[EAFE] Ready  Mode:${currentMode.name}  Elytra:${ok ? `${elytraInfo.equippedDur}/432` : '✗'}  Rockets:${count}  |  f=fly  m fast/med/low  s=stop`);
           } catch(_) {}
         });
       });
@@ -1008,24 +1065,14 @@ function createBot() {
     bot.on('playerCollect', collector => {
       if (collector.username !== bot.username) return;
       setTimeout(() => {
-        const chest = bot.inventory.slots[6];
-        if (!chest || chest.name !== 'elytra') {
-          if (bot.inventory.items().find(i => i.name === 'elytra')) {
-            console.log('[EAFE] 🎽 Elytra picked up — auto-equipping');
-            auditAndEquipElytra().catch(() => {});
-          }
-        }
+        auditAndEquipElytra().catch(() => {});
         autoEquipRocket().catch(() => {});
       }, 300);
     });
 
     bot.inventory.on('updateSlot', (slot, oldItem, newItem) => {
       if (newItem?.name === 'elytra') {
-        const chest = bot.inventory.slots[6];
-        if (!chest || chest.name !== 'elytra') {
-          console.log('[EAFE] 🎽 Elytra inventory update — auto-equipping');
-          setTimeout(() => auditAndEquipElytra().catch(() => {}), 200);
-        }
+        setTimeout(() => auditAndEquipElytra().catch(() => {}), 200);
       }
       if (newItem?.name === 'firework_rocket') {
         setTimeout(() => autoEquipRocket().catch(() => {}), 200);
@@ -1048,11 +1095,12 @@ function createBot() {
 
 // ─── BANNER ──────────────────────────────────────────────────────────────────
 console.log('╔═════════════════════════════════════════════════════════════╗');
-console.log('║  EAFE v9.1 — 100% Correct Minecraft Yaw Engine & 2s Check   ║');
-console.log('║  Yaw Correction: Math.atan2(-(x-px), -(z-pz)) (100% South)  ║');
+console.log('║  EAFE v9.2 — Best Elytra Auto-Swap & Diagnostic System      ║');
+console.log('║  Elytra Auto-Swap: Auto-equips highest durability Elytra     ║');
+console.log('║  Diagnostics: Logs & chats exact Elytra health (e.g. 400/432)║');
+console.log('║  Throttled Warnings: Terrain warning rate-limited to 3s      ║');
+console.log('║  Yaw Engine: Math.atan2(-(x-px), -(z-pz)) (100% South)      ║');
 console.log('║  2-Second Check: Alarms and re-aligns if distance increases  ║');
-console.log('║  Modes: FAST (30m/s), MEDIUM (22m/s), EFFICIENT (14m/s)    ║');
-console.log('║  Bulletproof Rockets: Refuses boost if heading error > 15°   ║');
 console.log(`║  Host: ${HOST}:${PORT}`.padEnd(61) + '║');
 console.log('╚═════════════════════════════════════════════════════════════╝');
 
