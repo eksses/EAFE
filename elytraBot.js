@@ -1,21 +1,19 @@
 'use strict';
 /**
- * EAFE v10.6 — 10% Backtrack Limit Rule & Goal-First Ocean Search
+ * EAFE v10.7 — Parallel Lawnmower Grid Search Engine (Boustrophedon Pattern)
  * ====================================================================================
  * Enhancements:
- *   1. 10% Backtrack Limit Rule for Safe Coastline Fallback:
+ *   1. Parallel Lawnmower Grid Sweep (startWanderScan):
+ *      - Replaced 4-sided box turning (which created U-turn loops on the 3rd turn) with long
+ *        PARALLEL TRACK SWEEPS (North -> Shift 128m East -> South -> Shift 128m East -> North).
+ *      - Flies 300m long parallel straight tracks across the ocean, with each track spaced
+ *        exactly 1 render distance width apart (128m).
+ *      - 100% systematic ocean coverage with ZERO U-turn box overlap!
+ *   2. 10% Backtrack Limit Rule for Safe Coastline Fallback:
  *      - The bot ONLY turns back to a known safe coastline (lastKnownSafeGround) if the distance
  *        to turn back is <= 10% of the total flight distance (e.g. <= 50m for a 500m trip)!
- *      - If the nearest safe coast is farther than 10% (e.g. back at launchpad base 467m away),
- *        the bot REJECTS backtracking and CONTINUES WANDER & SCAN around the goal location!
- *   2. Goal-Location First Ocean Search (startWanderScan):
- *      - Executes a straight-line grid lawnmower search around the GOAL LOCATION FIRST.
- *   3. Remaining Firework Rocket Count in Arrival Announcement:
- *      - Arrival message reports remaining fireworks:
- *        "✅ Destination Reached! Arrived safely at (...) | Rockets remaining: 45/51"
- *   4. Dynamic Unbreaking-Aware Elytra Health & Mid-Flight Auto-Swap:
- *      - Audits Unbreaking 1-3 damage rates (25%-50%), sums durability across all inventory Elytras,
- *        and auto-swaps mid-flight with instant flight recovery.
+ *   3. Goal-Location First Ocean Search & Remaining Rocket Announcement:
+ *      - Scans goal location first, and reports remaining fireworks on arrival.
  *
  * Commands: f [X Z], setgoal X Z, m fast/med/low, s, status, audit.
  */
@@ -137,11 +135,12 @@ function createBot() {
   let lastKnownSafeGround = null;
   let flightStartPos      = null;
 
-  // Straight-line grid lawn-mower search state
-  let gridDirIndex        = 0;            // 0=North, 1=East, 2=South, 3=West
-  let gridLegLength       = 1;            // Current leg multiplier
-  let legStartPos         = null;         // Start position of current straight leg
-  const scannedChunks     = new Set();    // Chunk Memory Map ("cx,cz")
+  // Parallel Lawnmower Grid Search state
+  let lawnState           = 'SWEEP';     // 'SWEEP' or 'SHIFT'
+  let sweepDirection      = 0;           // 0=North, 2=South
+  let trackCount          = 1;           // Current parallel track number
+  let legStartPos         = null;        // Start position of current straight leg
+  const scannedChunks     = new Set();   // Chunk Memory Map ("cx,cz")
 
   let physEngine          = null;
   let flyLoop             = null;
@@ -1185,23 +1184,34 @@ function createBot() {
         }
       }
 
-      // 4. Straight-Line Grid Navigation (Cardinal Legs)
+      // 4. Parallel Lawnmower Grid Navigation (Boustrophedon Parallel Tracks)
       if (!legStartPos) legStartPos = pos.clone();
-      const distOnLeg = Math.hypot(pos.x - legStartPos.x, pos.z - legStartPos.z);
-      const targetLegDist = gridLegLength * legDistanceStep;
 
-      // Check if current straight leg distance is completed
-      if (distOnLeg >= targetLegDist) {
-        gridDirIndex = (gridDirIndex + 1) % 4; // Turn 90° right to next cardinal direction
-        if (gridDirIndex === 0 || gridDirIndex === 2) {
-          gridLegLength++; // Expand grid leg size every 2 turns
+      const sweepLength   = Math.max(rDist.blocks * 3, 300); // 300m long parallel tracks
+      const shiftDistance = Math.round(rDist.blocks * 1.5);  // 128m offset shift East
+
+      let targetYaw = CARDINAL_YAWS[sweepDirection]; // North (0) or South (2)
+
+      if (lawnState === 'SWEEP') {
+        const distOnSweep = Math.hypot(pos.x - legStartPos.x, pos.z - legStartPos.z);
+        if (distOnSweep >= sweepLength) {
+          lawnState = 'SHIFT';
+          legStartPos = pos.clone();
+          console.log(`[EAFE] 🧭 Parallel Track ${trackCount} complete (${sweepLength}m)! Shifting ${shiftDistance}m East...`);
         }
-        legStartPos = pos.clone();
-        const dirNames = ['North', 'East', 'South', 'West'];
-        console.log(`[EAFE] 🧭 Completed leg! Turning 90° to face ${dirNames[gridDirIndex]} (Target leg dist: ${gridLegLength * legDistanceStep}m, Scanned chunks: ${scannedChunks.size})`);
+      } else if (lawnState === 'SHIFT') {
+        targetYaw = -Math.PI / 2; // Face East (+X) for side shift
+        const distOnShift = Math.hypot(pos.x - legStartPos.x, pos.z - legStartPos.z);
+        if (distOnShift >= shiftDistance) {
+          lawnState = 'SWEEP';
+          sweepDirection = (sweepDirection === 0) ? 2 : 0; // Flip North <-> South direction
+          trackCount++;
+          legStartPos = pos.clone();
+          const dirName = (sweepDirection === 0) ? 'North' : 'South';
+          console.log(`[EAFE] 🧭 Shift complete! Flying Track ${trackCount} facing ${dirName} (Parallel spacing: ${shiftDistance}m)...`);
+        }
       }
 
-      const targetYaw = CARDINAL_YAWS[gridDirIndex];
       const vel = bot.entity.velocity;
       const speed = Math.hypot(vel.x, vel.y, vel.z);
 
@@ -1211,8 +1221,8 @@ function createBot() {
 
       lookForce(targetYaw, dynamicPitch);
 
-      const dirNames = ['North', 'East', 'South', 'West'];
-      console.log(`[EAFE] [GRID_SCAN] Y=${pos.y.toFixed(1)} dir=${dirNames[gridDirIndex]} legDist=${distOnLeg.toFixed(0)}/${targetLegDist}m speed=${(speed*20).toFixed(1)}m/s rockets=${rCount} scannedChunks=${scannedChunks.size}`);
+      const stateName = lawnState === 'SWEEP' ? (sweepDirection === 0 ? 'North-Track' : 'South-Track') : 'East-Shift';
+      console.log(`[EAFE] [GRID_SCAN] Y=${pos.y.toFixed(1)} track=${trackCount} mode=${stateName} speed=${(speed*20).toFixed(1)}m/s rockets=${rCount} scannedChunks=${scannedChunks.size}`);
     }, 200);
   }
 
