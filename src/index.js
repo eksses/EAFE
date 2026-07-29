@@ -65,13 +65,27 @@ class ElytraFlight extends EventEmitter {
     this._logger = Logger;
     if (this.opts.debug) this._logger.setDebug(true);
 
-    // Build context and initialize modules
+    // Build context first (modules need it)
     this._buildCtx();
+
+    // Create modules with full ctx
     this._rockets = createRocketEngine(this._ctx);
     this._spatial = createSpatialEngine(this._ctx);
     this._wander = createWanderEngine(this._ctx);
     this._landing = createLandingEngine(this._ctx);
     this._phases = createFlightPhases(this._ctx);
+
+    // Wire module methods into ctx
+    this._ctx.fireRocketDirect = this._rockets.fireRocketDirect;
+    this._ctx.smartFireRocket = this._rockets.smartFireRocket;
+    this._ctx.getBoostTime = this._rockets.getBoostTime;
+    this._ctx.spatial = this._spatial;
+    this._ctx.wander = this._wander;
+    this._ctx.startWanderScan = this._wander.startWanderScan;
+    this._ctx.startLanding = this._landing.startLanding;
+    this._ctx.startFlight = this._phases.startFlight;
+    this._ctx.startClimb = this._phases.startClimb;
+    this._ctx.startCruise = this._phases.startCruise;
 
     // Reset state on respawn
     this.bot.on('spawn', () => {
@@ -221,7 +235,7 @@ class ElytraFlight extends EventEmitter {
 
       emergencyStop: (reason) => self._emergencyStop(reason),
 
-      // Module references — populated below
+      // Module references — populated after module creation
       fireRocketDirect: null,
       smartFireRocket: null,
       getBoostTime: null,
@@ -235,20 +249,6 @@ class ElytraFlight extends EventEmitter {
       checkMidFlightElytraSwap: null,
       auditAndEquipElytra: () => auditAndEquipElytra(self._ctx),
     };
-
-    // Wire modules
-    const rocketMod = createRocketEngine(this._ctx);
-    this._ctx.fireRocketDirect = rocketMod.fireRocketDirect;
-    this._ctx.smartFireRocket = rocketMod.smartFireRocket;
-    this._ctx.getBoostTime = rocketMod.getBoostTime;
-
-    this._ctx.spatial = this._spatial;
-    this._ctx.wander = this._wander;
-    this._ctx.startWanderScan = this._wander.startWanderScan;
-    this._ctx.startLanding = this._landing.startLanding;
-    this._ctx.startFlight = this._phases.startFlight;
-    this._ctx.startClimb = this._phases.startClimb;
-    this._ctx.startCruise = this._phases.startCruise;
 
     // Mid-flight elytra swap
     this._ctx.checkMidFlightElytraSwap = async () => {
