@@ -1,7 +1,7 @@
 {
   "name": "@eksses/eafe",
   "version": "11.0.1",
-  "description": "Autonomous elytra flight engine for mineflayer — 3 lines to fly anywhere in Minecraft",
+  "description": "Autonomous elytra flight engine for mineflayer — fly anywhere in Minecraft with 3 lines of code. Handles takeoff, climb, cruise, terrain avoidance, and safe landing automatically.",
   "main": "src/index.js",
   "exports": {
     ".": "./src/index.js",
@@ -18,7 +18,8 @@
   },
   "scripts": {
     "start": "node examples/basic.js",
-    "test": "node -e \"require('./src/index.js'); console.log('OK')\""
+    "test": "node -e \"require('./src/index.js'); console.log('OK')\"",
+    "demo": "node examples/demo.js"
   },
   "repository": {
     "type": "git",
@@ -32,9 +33,16 @@
     "autonomous-flight",
     "elytra-flying",
     "mineflayer-plugin",
-    "minecraft-bot"
+    "minecraft-bot",
+    "delivery-bot",
+    "item-transfer",
+    "waypoint-travel",
+    "auto-land",
+    "terrain-avoidance",
+    "firework-rocket",
+    "flight-engine"
   ],
-  "author": "eksses",
+  "author": "eksses <shamirbhuiyan2@gmail.com>",
   "license": "MIT",
   "type": "commonjs",
   "bugs": {
@@ -54,10 +62,14 @@
   },
   "files": [
     "src/",
-    "README.md"
+    "README.md",
+    "AGENTS.md"
   ],
   "devDependencies": {
     "npm-run-all2": "^9.0.3",
     "vec3": "^0.2.0"
+  },
+  "engines": {
+    "node": ">=16.0.0"
   }
 }
