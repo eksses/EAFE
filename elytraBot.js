@@ -1,18 +1,20 @@
 'use strict';
 /**
- * EAFE v10.8 — ReferenceError Fix & Smooth Takeoff Kinetic Energy Protection
+ * EAFE v10.9 — Elytra Auto-Swap Hysteresis Failsafe & Log De-clutter
  * ====================================================================================
  * Enhancements:
- *   1. Fixed ReferenceError: gridDirIndex is not defined:
- *      - Replaced leftover gridDirIndex with sweepDirection in startWanderScan().
- *   2. Takeoff Kinetic Energy Protection & Smooth Pitch Ramping:
- *      - Ramps pitch smoothly (0.45 -> 0.65 rad) on launch to build upward momentum smoothly
- *        without hitting overhead structures or taking kinetic energy damage.
- *      - Added 5-tick (1.0s) ground packet grace period during climb to prevent false ground-contact fails.
- *   3. Parallel Lawnmower Grid Search Engine (Boustrophedon Pattern):
- *      - Flies 300m parallel straight tracks across the ocean, shifting 128m East between sweeps.
- *   4. 10% Backtrack Limit Rule & Goal-First Search:
- *      - Only turns back if safe coast is within 10% of total trip distance; otherwise wanders and scans.
+ *   1. Elytra Auto-Swap Hysteresis Failsafe (auditAndEquipElytra):
+ *      - Fixed 1-durability ping-pong thrashing mid-flight!
+ *      - Enforced 30-durability hysteresis threshold: Only swaps if spare Elytra has at least
+ *        30 MORE durability points, OR if equipped Elytra drops to <= 15 points!
+ *      - Eliminated repeated log spam "[EAFE] ✓ Equipped Elytra is optimal".
+ *   2. Phase-Restricted Inventory Listeners:
+ *      - Restricted playerCollect and updateSlot auto-equip triggers strictly to PHASE.IDLE so armor
+ *        swaps are never invoked continuously mid-air.
+ *   3. Smooth Takeoff & Takeoff Kinetic Energy Protection:
+ *      - Smooth 0.45 -> 0.65 rad pitch ramp & 5-tick climb grace period.
+ *   4. Parallel Lawnmower Grid Search & 10% Backtrack Limit Rule:
+ *      - Boustrophedon 300m parallel sweeps with 128m East shifts and 10% backtrack limit.
  *
  * Commands: f [X Z], setgoal X Z, m fast/med/low, s, status, audit.
  */
@@ -314,23 +316,29 @@ function createBot() {
   async function auditAndEquipElytra() {
     let bestSlot = null;
     let bestDur  = -1;
+    let currentEquippedDur = -1;
 
     // Check equipped chest slot (slot 6)
     const chest = bot.inventory.slots[6];
     if (chest?.name === 'elytra') {
-      const dur = chest.maxDurability ? (chest.maxDurability - chest.durabilityUsed) : 432;
+      currentEquippedDur = chest.maxDurability ? (chest.maxDurability - chest.durabilityUsed) : 432;
       bestSlot = 6;
-      bestDur  = dur;
+      bestDur  = currentEquippedDur;
     }
 
-    // Check all inventory slots for a higher durability Elytra
+    // Check all inventory slots for a significantly higher durability Elytra
     for (let s = 0; s <= 45; s++) {
+      if (s === 6) continue;
       const item = bot.inventory.slots[s];
       if (item && item.name === 'elytra') {
         const dur = item.maxDurability ? (item.maxDurability - item.durabilityUsed) : 432;
-        if (dur > bestDur) {
-          bestDur  = dur;
-          bestSlot = s;
+        // Hysteresis Failsafe: Only swap if spare Elytra has at least 30 MORE durability points
+        // OR if currently equipped Elytra is depleted (<= 15 points)!
+        if (dur > (currentEquippedDur + 30) || currentEquippedDur <= 15) {
+          if (dur > bestDur) {
+            bestDur  = dur;
+            bestSlot = s;
+          }
         }
       }
     }
@@ -343,19 +351,17 @@ function createBot() {
       return false;
     }
 
-    // If highest durability Elytra is in inventory (not chest slot 6), auto-swap to it!
+    // If a significantly better Elytra is in inventory (not chest slot 6), auto-swap to it!
     if (bestSlot !== 6) {
       const spareItem = bot.inventory.slots[bestSlot];
       try {
         await bot.equip(spareItem, 'torso');
-        console.log(`[EAFE] 🎽 Auto-swapped to best Elytra from slot ${bestSlot} (Durability: ${bestDur}/432)`);
+        console.log(`[EAFE] 🎽 Auto-swapped to best Elytra from slot ${bestSlot} (Durability: ${bestDur}/432 vs old ${currentEquippedDur}/432)`);
         try { bot.chat(`[EAFE] 🎽 Auto-swapped to best Elytra (${bestDur}/432 durability)`); } catch(_) {}
       } catch(e) {
         console.error('[EAFE] ✗ Equip best elytra failed:', e.message);
         return false;
       }
-    } else {
-      console.log(`[EAFE] ✓ Equipped Elytra is optimal (Durability: ${bestDur}/432)`);
     }
 
     return true;
@@ -1467,9 +1473,10 @@ function createBot() {
       });
     }, 2000);
 
-    // ── Auto-equip when picked up or received ────────────────────────────
+    // ── Auto-equip when picked up or received (ONLY WHEN IDLE) ────────────────────
     bot.on('playerCollect', collector => {
       if (collector.username !== bot.username) return;
+      if (phase !== PHASE.IDLE) return;
       setTimeout(() => {
         auditAndEquipElytra().catch(() => {});
         autoEquipRocket().catch(() => {});
@@ -1477,6 +1484,7 @@ function createBot() {
     });
 
     bot.inventory.on('updateSlot', (slot, oldItem, newItem) => {
+      if (phase !== PHASE.IDLE) return;
       if (newItem?.name === 'elytra') {
         setTimeout(() => auditAndEquipElytra().catch(() => {}), 200);
       }
