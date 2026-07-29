@@ -31,6 +31,11 @@ function createWanderEngine(ctx) {
           if (!isSafeSolidBlock(b)) return null;
           const gy = y + 1;
           if (!hasOpenAir(x, gy, z)) return null;
+          // Margin: 1 block in each cardinal direction
+          for (const [dx, dz] of [[-1,0],[1,0],[0,-1],[0,1]]) {
+            const nb = bot.blockAt(new Vec3(x + dx, gy - 1, z + dz));
+            if (!nb || !isSafeSolidBlock(nb)) return null;
+          }
           return { x, z, y: gy, blockName: b.name, safe: true };
         }
       }
@@ -102,19 +107,27 @@ function createWanderEngine(ctx) {
         }
       }
 
-      // Check ground below — land if safe
+      // Check ground below — land if safe (with margin)
       const groundBelow = ctx.spatial.getGroundBlockAt(Math.round(pos.x), Math.round(pos.z));
       if (groundBelow && isSafeSolidBlock(groundBelow)) {
         const gy = (groundBelow.position?.y ?? 60) + 1;
         const a1 = bot.blockAt(new Vec3(Math.round(pos.x), gy, Math.round(pos.z)));
         const a2 = bot.blockAt(new Vec3(Math.round(pos.x), gy + 1, Math.round(pos.z)));
         if ((!a1 || isAir(a1)) && (!a2 || isAir(a2))) {
-          clearInterval(ctx.flyLoop);
-          ctx.flyLoop = null;
-          state.activeTargetX = Math.round(pos.x);
-          state.activeTargetZ = Math.round(pos.z);
-          ctx.startLanding();
-          return;
+          // Check 1-block margin
+          let marginOk = true;
+          for (const [dx, dz] of [[-1,0],[1,0],[0,-1],[0,1]]) {
+            const nb = bot.blockAt(new Vec3(Math.round(pos.x) + dx, gy - 1, Math.round(pos.z) + dz));
+            if (!nb || !isSafeSolidBlock(nb)) { marginOk = false; break; }
+          }
+          if (marginOk) {
+            clearInterval(ctx.flyLoop);
+            ctx.flyLoop = null;
+            state.activeTargetX = Math.round(pos.x);
+            state.activeTargetZ = Math.round(pos.z);
+            ctx.startLanding();
+            return;
+          }
         }
       }
 

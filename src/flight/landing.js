@@ -72,14 +72,25 @@ function createLandingEngine(ctx) {
       // LANDED
       if (bot.entity.onGround) {
         clearInterval(landLoop);
+
+        // Check if landed on safe ground
+        const landedBlock = ctx.spatial.getGroundBlockAt(Math.round(p.x), Math.round(p.z));
+        if (!landedBlock || !isSafeSolidBlock(landedBlock)) {
+          // Landed on water/lava/hazard — look up and search again
+          Logger.warn(`landed on ${landedBlock?.name || 'hazard'} -- searching`);
+          ctx.lookForce(ctx.yawTo(tx, tz), 0.50);
+          spotFound = false;
+          tick = 0;
+          return;
+        }
+
         try { bot.setControlState('sneak', false); } catch(_) {}
         state.retries = 0;
         state.spatialClear = false;
-        const b = ctx.spatial.getGroundBlockAt(Math.round(p.x), Math.round(p.z));
         const errH = Math.hypot(p.x - tx, p.z - tz);
 
-        Logger.info(`landed (${Math.round(p.x)},${Math.round(p.y)},${Math.round(p.z)}) [${b?.name || 'ground'}] err=${errH.toFixed(1)} rkt=${ctx.countRockets(bot)}`);
-        ctx.setPhase(ctx.PHASE.IDLE, `land (${Math.round(p.x)},${Math.round(p.y)},${Math.round(p.z)}) ${b?.name || 'ground'} err=${errH.toFixed(1)}`);
+        Logger.info(`landed (${Math.round(p.x)},${Math.round(p.y)},${Math.round(p.z)}) [${landedBlock.name}] err=${errH.toFixed(1)} rkt=${ctx.countRockets(bot)}`);
+        ctx.setPhase(ctx.PHASE.IDLE, `land (${Math.round(p.x)},${Math.round(p.y)},${Math.round(p.z)}) ${landedBlock.name} err=${errH.toFixed(1)}`);
         return;
       }
 
