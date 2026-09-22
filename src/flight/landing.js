@@ -1,35 +1,60 @@
 'use strict';
 
-const Logger = require('../logger');
-const { isSafeSolidBlock } = require('../utils');
+const { ErrorCode } = require('../errors');
 
 function createLandingEngine(ctx) {
-  const { bot, state } = ctx;
+  const { bot } = ctx;
 
   /**
-   * Spiral descent toward landing spot.
+   * Spiral descent toward a landing spot.
    * Pitch adjusts by altitude: high → steep, low → shallow.
-   * No rockets — gravity only.
+   * No rockets — gravity only (unless the bot touches a hazard and must
+   * relocate, which needs a boost).
+   *
+   * @param {object} [options]
+   * @param {{x:number,z:number,y:number,blockName?:string}|null} [options.spot]
+   *        Pre-verified spot. When omitted, one is searched in the first
+   *        three ticks (or the scan hands off to wander).
+   * @param {boolean} [options.skipSpotSearch]  land directly at the target
+   *        column (used when `landing: false`).
    */
-  function startLanding() {
+  function startLanding(options = {}) {
+    const { spot = null, skipSpotSearch = false } = options;
+
     if (ctx.rocketLoop) { clearInterval(ctx.rocketLoop); ctx.rocketLoop = null; }
     if (ctx.flyLoop) { clearInterval(ctx.flyLoop); ctx.flyLoop = null; }
     if (ctx.verifyLoop) { clearInterval(ctx.verifyLoop); ctx.verifyLoop = null; }
     if (ctx.climbLoop) { clearInterval(ctx.climbLoop); ctx.climbLoop = null; }
+    if (ctx.landLoop) { clearInterval(ctx.landLoop); ctx.landLoop = null; }
 
     const rDist = ctx.spatial.getServerRenderDistance();
-    ctx.setPhase(ctx.PHASE.LANDING, `scan ${rDist.chunks}ch (${state.activeTargetX},${state.activeTargetZ})`);
+    ctx.setPhase(ctx.PHASE.LANDING, `scan ${rDist.chunks}ch (${ctx.state.activeTargetX},${ctx.state.activeTargetZ})`);
 
-    let tx = state.activeTargetX;
-    let tz = state.activeTargetZ;
+    let tx = ctx.state.activeTargetX;
+    let tz = ctx.state.activeTargetZ;
     let tY = null;
     let spotFound = false;
     let tick = 0;
     let lastLog = 0;
-    let spiralAngle = 0;
 
-    const landLoop = setInterval(() => {
-      if (state.phase !== ctx.PHASE.LANDING) { clearInterval(landLoop); return; }
+    if (skipSpotSearch) {
+      // Direct dive at the target column (no spot search / no wander)
+      const g = ctx.spatial.getGroundBlockAt(tx, tz, bot.entity.position.y + 10);
+      tY = (g?.position?.y ?? 60) + 1;
+      spotFound = true;
+    } else if (spot && spot.safe) {
+      tx = spot.x;
+      tz = spot.z;
+      tY = spot.y;
+      spotFound = true;
+      ctx.logger.info(`goal (${tx},${tY},${tz}) [${spot.blockName}]`);
+      try { bot.chat(`Landing at (${tx},${tY},${tz})`); } catch (_) { /* bot gone */ }
+    }
+
+    const MAX_TICKS = 2400; // 50ms ticks = 120s
+
+    ctx.landLoop = setInterval(() => {
+      if (ctx.state.phase !== ctx.PHASE.LANDING) { clearInterval(ctx.landLoop); ctx.landLoop = null; return; }
       tick++;
 
       const p = bot.entity.position;
@@ -38,31 +63,43 @@ function createLandingEngine(ctx) {
       const dH = Math.hypot(p.x - tx, p.z - tz);
       const dV = tY !== null ? p.y - tY : 200;
 
-      // Keep elytra active
-      if (!ctx.isFlying() && !bot.entity.onGround) {
-        try { bot.elytraFly(); } catch(_) {}
+      // Landing timeout
+      if (tick > MAX_TICKS) {
+        clearInterval(ctx.landLoop); ctx.landLoop = null;
+        ctx.failFlight(ErrorCode.LANDING_TIMEOUT, `dV=${dV.toFixed(0)} dH=${dH.toFixed(0)}`);
+        return;
       }
 
-      // FIND SPOT: first3 ticks only
+      // Keep elytra active
+      if (!ctx.isFlying() && !bot.entity.onGround) {
+        try { bot.elytraFly(); } catch (_) { /* already flying */ }
+      }
+
+      // FIND SPOT: first 3 ticks only (searches are expensive — never repeat
+      // the full ring scan every tick)
       if (!spotFound) {
-        ctx.lookForce(ctx.yawTo(state.activeTargetX, state.activeTargetZ), -0.10);
+        ctx.lookForce(ctx.yawTo(ctx.state.activeTargetX, ctx.state.activeTargetZ), -0.10);
 
         if (tick <= 3) {
-          const spot = ctx.wander.findSafeLandingSpotAround(state.activeTargetX, state.activeTargetZ);
-          if (spot.safe) {
-            tx = spot.x;
-            tz = spot.z;
-            tY = spot.y;
+          const found = ctx.wander.findSafeLandingSpotAround(ctx.state.activeTargetX, ctx.state.activeTargetZ);
+          if (found.safe) {
+            tx = found.x;
+            tz = found.z;
+            tY = found.y;
             spotFound = true;
-            Logger.info(`goal (${tx},${tY},${tz}) [${spot.blockName}]`);
-            try { bot.chat(`Landing at (${tx},${tY},${tz})`); } catch(_) {}
+            ctx.logger.info(`goal (${tx},${tY},${tz}) [${found.blockName}]`);
+            try { bot.chat(`Landing at (${tx},${tY},${tz})`); } catch (_) { /* bot gone */ }
           }
         }
 
         if (!spotFound && tick > 3) {
-          Logger.info(`no spot at (${state.activeTargetX},${state.activeTargetZ}) -- wander`);
-          clearInterval(landLoop);
-          ctx.startWanderScan();
+          clearInterval(ctx.landLoop); ctx.landLoop = null;
+          if (ctx.opts.wander) {
+            ctx.logger.info(`no spot at (${ctx.state.activeTargetX},${ctx.state.activeTargetZ}) -- wander`);
+            ctx.startWanderScan();
+          } else {
+            ctx.failFlight(ErrorCode.NO_SAFE_SPOT, 'no landing spot (wander off)');
+          }
           return;
         }
 
@@ -71,67 +108,56 @@ function createLandingEngine(ctx) {
 
       // LANDED
       if (bot.entity.onGround) {
-        clearInterval(landLoop);
+        clearInterval(ctx.landLoop); ctx.landLoop = null;
 
         // Check if landed on safe ground
-        const landedBlock = ctx.spatial.getGroundBlockAt(Math.round(p.x), Math.round(p.z));
-        if (!landedBlock || !isSafeSolidBlock(landedBlock)) {
-          // Landed on water/lava/hazard — look up and search again
-          Logger.warn(`landed on ${landedBlock?.name || 'hazard'} -- searching`);
-          ctx.lookForce(ctx.yawTo(tx, tz), 0.50);
-          spotFound = false;
-          tick = 0;
+        const landedBlock = ctx.spatial.getGroundBlockAt(Math.round(p.x), Math.round(p.z), p.y + 10);
+        if (!landedBlock || !ctx.isSafeSolid(landedBlock)) {
+          // On a hazard (cactus, berry bush, powder snow, ...). The old code
+          // just reset the search timer and looped forever standing on it.
+          ctx.logger.warn(`landed on ${landedBlock?.name || 'hazard'} -- relocating`);
+          if (ctx.opts.autoRocket && ctx.countRockets() > 0) {
+            ctx.startWanderScan();
+          } else {
+            // Can't get airborne — retry the flight (may find a different spot)
+            ctx.failFlight(ErrorCode.NO_SAFE_SPOT, `unsafe ground ${landedBlock?.name || 'hazard'}`);
+          }
           return;
         }
 
-        try { bot.setControlState('sneak', false); } catch(_) {}
-        state.retries = 0;
-        state.spatialClear = false;
+        try { bot.setControlState('sneak', false); } catch (_) { /* bot gone */ }
         const errH = Math.hypot(p.x - tx, p.z - tz);
 
-        Logger.info(`landed (${Math.round(p.x)},${Math.round(p.y)},${Math.round(p.z)}) [${landedBlock.name}] err=${errH.toFixed(1)} rkt=${ctx.countRockets(bot)}`);
-        ctx.setPhase(ctx.PHASE.IDLE, `land (${Math.round(p.x)},${Math.round(p.y)},${Math.round(p.z)}) ${landedBlock.name} err=${errH.toFixed(1)}`);
+        ctx.logger.info(`landed (${Math.round(p.x)},${Math.round(p.y)},${Math.round(p.z)}) [${landedBlock.name}] err=${errH.toFixed(1)} rkt=${ctx.countRockets()}`);
+        ctx.completeFlight();
         return;
       }
 
-      // DEATH PROTECTION
+      // DEATH PROTECTION — descending fast and close to the spot: level out.
+      // (A shallow 0.30 instead of 0.40: the old steep look-up traded hard
+      // dives for permanent hover-orbits.)
       if (v.y < -0.15 && dV < 8) {
-        ctx.lookForce(ctx.yawTo(tx, tz), 0.40);
+        ctx.lookForce(ctx.yawTo(tx, tz), 0.30);
         return;
       }
 
-      // SPIRAL DESCENT
-      if (dV > 5 || spd > 0.5) {
-        const r = dV > 30 ? 3.0 : dV > 15 ? 2.0 : 1.2;
-        spiralAngle += dV > 20 ? 0.08 : 0.12;
-
-        const sx = tx + Math.cos(spiralAngle) * r;
-        const sz = tz + Math.sin(spiralAngle) * r;
-        const pitch = dV > 50 ? -0.25 : dV > 30 ? -0.15 : dV > 15 ? -0.08 : dV > 5 ? -0.03 : 0.0;
-
-        ctx.lookForce(ctx.yawTo(sx, sz), pitch);
-
-        if (tick - lastLog > 20) {
-          Logger.debug(`spiral spd=${(spd * 20).toFixed(0)} dH=${dH.toFixed(0)} dV=${dV.toFixed(0)}`);
-          lastLog = tick;
-        }
-        return;
-      }
-
-      // FINAL APPROACH
+      // FINAL APPROACH — over the spot and almost on the ground: settle
       if (dV < 1.5 && dH < 2) {
-        ctx.lookForce(ctx.yawTo(tx, tz), 0.15);
-        try { bot.setControlState('sneak', true); } catch(_) {}
-      } else {
-        const ideal = dH > 0.5 ? Math.atan2(-dV, dH) : -0.20;
-        const cur = bot.entity.pitch;
-        const err = ideal - cur;
-        const pitch = Math.abs(err) > 0.1 ? cur + err * 0.15 : ideal;
-        ctx.lookForce(ctx.yawTo(tx, tz), pitch);
+        ctx.lookForce(ctx.yawTo(tx, tz), 0.10);
+        return;
       }
+
+      // GLIDE TO GOAL — aim straight at the spot. The aim point is the goal
+      // itself (the old code orbited a point around the goal, which made a
+      // fast bot circle the target and skim the ground far away from it).
+      // Horizontal closure is always >= speed*cos(0.5), so this converges
+      // from any distance the landing trigger can produce.
+      const ideal = dH > 0.5 ? Math.atan2(-Math.min(dV, 40), dH) : -0.30;
+      const pitch = Math.max(-0.5, Math.min(-0.02, ideal));
+      ctx.lookForce(ctx.yawTo(tx, tz), pitch);
 
       if (tick - lastLog > 15) {
-        Logger.debug(`final spd=${(spd * 20).toFixed(0)} dH=${dH.toFixed(1)} dV=${dV.toFixed(1)}`);
+        ctx.logger.debug(`glide spd=${(spd * 20).toFixed(0)} dH=${dH.toFixed(1)} dV=${dV.toFixed(1)}`);
         lastLog = tick;
       }
     }, 50);

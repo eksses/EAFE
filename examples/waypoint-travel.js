@@ -25,13 +25,9 @@ bot.once('spawn', () => {
     debug: true,
   });
 
-  flight.on('phase', (phase) => {
-    if (phase === 'IDLE' && waypointMode) {
-      goToNextWaypoint();
-    }
+  flight.on('phase', (phase, msg) => {
+    if (msg) console.log(`[${phase}] ${msg}`);
   });
-
-  flight.on('error', (err) => console.error('Error:', err.message));
 
   bot.on('chat', (user, msg) => {
     const args = msg.split(' ');
@@ -39,7 +35,11 @@ bot.once('spawn', () => {
     // Fly to named location
     if (args[0] === 'goto' && locations[args[1]]) {
       const loc = locations[args[1]];
-      flight.fly(loc.x, loc.z);
+      flight.fly(loc.x, loc.z)
+        .then(() => bot.chat(`Landed at ${args[1]}`))
+        .catch((err) => {
+          if (err.code !== 'STOPPED') bot.chat(`Flight failed: ${err.code}`);
+        });
       bot.chat(`Flying to ${args[1]} (${loc.x},${loc.z})`);
     }
 
@@ -47,12 +47,17 @@ bot.once('spawn', () => {
     if (args[0] === 'fly') {
       const x = parseInt(args[1]) || 0;
       const z = parseInt(args[2]) || 0;
-      flight.fly(x, z);
+      flight.fly(x, z)
+        .then(() => bot.chat(`Landed at (${x},${z})`))
+        .catch((err) => {
+          if (err.code !== 'STOPPED') bot.chat(`Flight failed: ${err.code}`);
+        });
       bot.chat(`Flying to (${x},${z})`);
     }
 
     // Start waypoint mode
     if (args[0] === 'waypoints') {
+      if (waypointMode) { bot.chat('Waypoint loop already running — use stop'); return; }
       waypointMode = true;
       currentWaypoint = 0;
       goToNextWaypoint();
@@ -81,7 +86,7 @@ bot.once('spawn', () => {
 
     // Status
     if (args[0] === 'status') {
-      const s = flight.setStatus(flight._targetX, flight._targetZ);
+      const s = flight.setStatus(flight.targetX, flight.targetZ);
       bot.chat(`${s.phase} | ${s.pos.x},${s.pos.y},${s.pos.z} | ${s.dist}m | rkt=${s.rockets}`);
     }
   });
@@ -97,8 +102,16 @@ bot.once('spawn', () => {
     const name = names[currentWaypoint];
     const loc = locations[name];
     bot.chat(`${currentWaypoint + 1}/${names.length}: ${name} (${loc.x},${loc.z})`);
-    flight.fly(loc.x, loc.z);
     currentWaypoint++;
+
+    // Chain the loop through the fly() promise (resolves on landing)
+    flight.fly(loc.x, loc.z)
+      .then(() => goToNextWaypoint())
+      .catch((err) => {
+        waypointMode = false;
+        if (err.code === 'STOPPED') { bot.chat('Waypoints cancelled'); return; }
+        bot.chat(`Waypoint loop failed: ${err.code}`);
+      });
   }
 
   console.log('Travel bot ready');

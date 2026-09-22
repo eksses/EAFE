@@ -1,12 +1,13 @@
 {
   "name": "@eksses/eafe",
-  "version": "11.0.3",
+  "version": "12.0.0",
   "description": "Autonomous elytra flight engine for mineflayer — fly anywhere in Minecraft with 3 lines of code. Handles takeoff, climb, cruise, terrain avoidance, and safe landing automatically.",
   "main": "src/index.js",
   "exports": {
     ".": "./src/index.js",
     "./logger": "./src/logger.js",
     "./constants": "./src/constants.js",
+    "./errors": "./src/errors.js",
     "./utils": "./src/utils.js",
     "./inventory": "./src/core/inventory.js",
     "./elytra": "./src/core/elytra.js",
@@ -18,7 +19,8 @@
   },
   "scripts": {
     "start": "node examples/basic.js",
-    "test": "node -e \"require('./src/index.js'); console.log('OK')\"",
+    "test": "node test/run.js",
+    "lint": "eslint src test examples",
     "demo": "node examples/demo.js"
   },
   "repository": {
@@ -50,15 +52,11 @@
   },
   "homepage": "https://github.com/eksses/EAFE#readme",
   "dependencies": {
-    "mineflayer-pathfinder": "^2.4.5"
+    "mineflayer-pathfinder": "^2.4.5",
+    "vec3": "^0.2.0"
   },
   "peerDependencies": {
     "mineflayer": ">=4.0.0"
-  },
-  "peerDependenciesMeta": {
-    "mineflayer": {
-      "optional": false
-    }
   },
   "files": [
     "src/",
@@ -67,8 +65,8 @@
     "LICENSE"
   ],
   "devDependencies": {
-    "npm-run-all2": "^9.0.3",
-    "vec3": "^0.2.0"
+    "@eslint/js": "^9.39.5",
+    "eslint": "^9.39.5"
   },
   "engines": {
     "node": ">=16.0.0"

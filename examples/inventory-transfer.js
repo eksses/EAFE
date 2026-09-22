@@ -23,13 +23,9 @@ bot.once('spawn', () => {
     debug: true,
   });
 
-  flight.on('phase', (phase) => {
-    if (phase === 'IDLE' && transferMode) {
-      handleTransferArrival();
-    }
+  flight.on('phase', (phase, msg) => {
+    if (msg) console.log(`[${phase}] ${msg}`);
   });
-
-  flight.on('error', (err) => console.error('Error:', err.message));
 
   bot.on('chat', (user, msg) => {
     const args = msg.split(' ');
@@ -50,6 +46,7 @@ bot.once('spawn', () => {
 
     // Transfer items
     if (args[0] === 'transfer' && args[1]) {
+      if (transferMode) { bot.chat('Transfer already in progress — use cancel'); return; }
       if (!storage.source || !storage.dest) {
         bot.chat('Set source and dest first');
         return;
@@ -58,13 +55,19 @@ bot.once('spawn', () => {
       transferItem = args[1];
       transferMode = true;
 
-      // Go to source first
+      // Go to source first — the fly() promise drives the next step
       bot.chat(`Going to source to pick up ${transferItem}...`);
-      flight.fly(storage.source.x, storage.source.z);
+      flight.fly(storage.source.x, storage.source.z)
+        .then(() => handleTransferArrival())
+        .catch((err) => {
+          transferMode = false;
+          if (err.code !== 'STOPPED') bot.chat(`Transfer failed: ${err.code}`);
+        });
     }
 
     // Transfer all items
     if (args[0] === 'transfer-all') {
+      if (transferMode) { bot.chat('Transfer already in progress — use cancel'); return; }
       if (!storage.source || !storage.dest) {
         bot.chat('Set source and dest first');
         return;
@@ -73,7 +76,12 @@ bot.once('spawn', () => {
       transferItem = null;
       transferMode = true;
       bot.chat('Going to source to pick up all items...');
-      flight.fly(storage.source.x, storage.source.z);
+      flight.fly(storage.source.x, storage.source.z)
+        .then(() => handleTransferArrival())
+        .catch((err) => {
+          transferMode = false;
+          if (err.code !== 'STOPPED') bot.chat(`Transfer failed: ${err.code}`);
+        });
     }
 
     // Cancel
@@ -86,7 +94,7 @@ bot.once('spawn', () => {
 
     // Status
     if (args[0] === 'status') {
-      const s = flight.setStatus(flight._targetX, flight._targetZ);
+      const s = flight.setStatus(flight.targetX, flight.targetZ);
       bot.chat(`${s.phase} | ${s.pos.x},${s.pos.y},${s.pos.z} | ${s.dist}m`);
     }
 
@@ -127,7 +135,12 @@ bot.once('spawn', () => {
           // Go to destination
           setTimeout(() => {
             bot.chat('Going to destination...');
-            flight.fly(storage.dest.x, storage.dest.z);
+            flight.fly(storage.dest.x, storage.dest.z)
+              .then(() => handleTransferArrival())
+              .catch((err) => {
+                transferMode = false;
+                if (err.code !== 'STOPPED') bot.chat(`Transfer failed: ${err.code}`);
+              });
           }, 1000);
         }).catch(err => {
           bot.chat(`Cannot open chest: ${err.message}`);

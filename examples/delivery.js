@@ -19,13 +19,10 @@ bot.once('spawn', () => {
     safety: true,
   });
 
-  flight.on('phase', (phase) => {
-    if (phase === 'IDLE' && isDelivering) {
-      processNextDelivery();
-    }
+  flight.on('phase', (phase, msg) => {
+    if (msg) console.log(`[${phase}] ${msg}`);
   });
-
-  flight.on('error', (err) => console.error('Error:', err.message));
+  flight.on('stopped', (reason) => console.log('Stopped:', reason));
 
   bot.on('chat', (user, msg) => {
     const args = msg.split(' ');
@@ -82,25 +79,36 @@ bot.once('spawn', () => {
     const next = deliveries[0];
 
     bot.chat(`Delivering to (${next.x},${next.z})...`);
-    flight.fly(next.x, next.z);
 
-    // Wait for arrival
-    flight.once('phase', function onArrival(phase) {
-      if (phase === 'IDLE') {
-        // Drop items
-        const item = bot.inventory.items().find(i => i.name === next.item);
-        if (item) {
-          bot.tossStack(item);
-          bot.chat(`Delivered ${next.count}x ${next.item} to (${next.x},${next.z})`);
-        } else {
-          bot.chat(`No ${next.item} to deliver`);
-        }
-
-        // Remove from queue
-        deliveries.shift();
-        processNextDelivery();
+    // The fly() promise is the single arrival signal — resolves with the
+    // landing position, rejects with a typed ElytraFlightError. (The old
+    // code also watched for the IDLE phase event here, which fired twice
+    // and double-processed the queue.)
+    try {
+      await flight.fly(next.x, next.z);
+    } catch (err) {
+      deliveries.shift();
+      if (err.code === 'STOPPED') {
+        bot.chat('Delivery cancelled');
+        return;
       }
-    });
+      bot.chat(`Delivery failed (${err.code}), skipping stop`);
+      processNextDelivery();
+      return;
+    }
+
+    // Drop items
+    const item = bot.inventory.items().find(i => i.name === next.item);
+    if (item) {
+      bot.tossStack(item);
+      bot.chat(`Delivered ${next.count}x ${next.item} to (${next.x},${next.z})`);
+    } else {
+      bot.chat(`No ${next.item} to deliver`);
+    }
+
+    // Remove from queue
+    deliveries.shift();
+    processNextDelivery();
   }
 
   console.log('Delivery bot ready');

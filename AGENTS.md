@@ -2,7 +2,20 @@
 
 ## Package Overview
 
-`@eksses/eafe` is a mineflayer plugin for autonomous elytra flight in Minecraft. It handles takeoff, climb, cruise, terrain avoidance, and safe landing automatically.
+`@eksses/eafe` is an autonomous elytra flight engine for mineflayer. It handles
+takeoff, climb, cruise, terrain avoidance, and safe landing automatically.
+`fly()` is **promise-based**: it resolves with the landing position and rejects
+with a typed `ElytraFlightError` (`err.code`).
+
+## Commands
+
+```bash
+node test/run.js            # unit + integration (~40s, real-time mock flights)
+node test/run.js unit       # unit only
+node test/run.js integ      # integration only
+npm run lint                # ESLint flat config over src, test, examples
+npm pack --dry-run          # verify package contents
+```
 
 ## Quick Start
 
@@ -13,7 +26,12 @@ const { ElytraFlight } = require('@eksses/eafe');
 const bot = mineflayer.createBot({ host: 'localhost', username: 'Bot' });
 bot.once('spawn', () => {
   const flight = new ElytraFlight(bot);
-  flight.fly(500, 500);
+  flight.fly(500, 500)
+    .then((res) => console.log('Landed at', res.landedAt))
+    .catch((err) => {
+      if (err.code === 'STOPPED') return;
+      console.error(err.code, err.message);
+    });
 });
 ```
 
@@ -21,199 +39,144 @@ bot.once('spawn', () => {
 
 ```
 src/
-├── index.js          # ElytraFlight class (main API)
-├── config.js         # Server config (host, port, debug)
-├── constants.js      # MODES, PHASE, HAZARD_SURFACES
-├── logger.js         # Logger with [E] prefix
-├── utils.js          # sleep, isAir, isSafeSolidBlock, angleDiff
-├── commands.js       # Chat command processor
+├── index.js          # ElytraFlight class (main API, ctx wiring, retry scheduler)
+├── constants.js      # MODES, PHASE, HAZARD_SURFACES, CARDINAL_YAWS
+├── errors.js         # ErrorCode (19 codes), ElytraFlightError, NON_RETRYABLE
+├── logger.js         # Logger with [E] prefix (per-instance)
+├── utils.js          # sleep, isAir, hasCollision, angleDiff
 ├── core/
-│   ├── chat.js       # safeChat, ownerTell, setPhase
 │   ├── inventory.js  # countRockets, findRocket, autoEquipRocket
-│   ├── elytra.js     # getElytraSummary, auditAndEquipElytra
-│   └── rockets.js    # fireRocketDirect, smartFireRocket
+│   ├── elytra.js     # getElytraSummary, auditAndEquipElytra, damage rate 2/(n+3)
+│   └── rockets.js    # fireRocketDirect (yaw-gated), smartFireRocket, getBoostTime
 └── flight/
-    ├── spatial.js    # getGroundBlockAt, scanFullRenderDistance
-    ├── phases.js     # startFlight, startClimb, startCruise
+    ├── spatial.js    # getGroundBlockAt, scanFullRenderDistance, ground tracking
+    ├── phases.js     # startFlight, startClimb, startCruise, executeTakeoff
     ├── wander.js     # findSafeLandingSpotAround, startWanderScan
-    └── landing.js    # startLanding (spiral descent)
+    └── landing.js    # startLanding (glide-to-goal, spot search, hazard check)
+
+legacy/elytraBot.js   # pre-12 monolith — reference only, NOT version-controlled
 ```
+
+All modules are factories taking a `ctx` object built in `index.js`
+(`_buildCtx`). Never reach across modules through `flight._ctx` — use the
+public options (`hazardCheck`, module switches) instead.
 
 ## Core API
 
 ### `new ElytraFlight(bot, options?)`
 
-Creates flight instance.
-
-**Options:**
 ```js
 {
-  mode: 'MED',           // 'FAST' | 'MED' | 'LOW'
-  cruiseAlt: 180,        // Cruise altitude (Y)
-  maxRetries: 3,         // Retry on failure
-  safety: true,          // Pre-flight checks
-  debug: false,          // Verbose logging
-  ownerUsername: '',     // Whisper alerts to
-  landingMargin: 2,      // Blocks from edge
-  targetX: 0,            // Default target
-  targetZ: 0,            // Default target
+  // Flight profile
+  mode: 'MED',               // 'FAST' | 'MED' | 'LOW'
+  cruiseAlt: 180,            // Cruise altitude (Y)
+  targetX: 0, targetZ: 0,    // Default target
+  landingMargin: 1,          // Margin around landing spot
+  // Reliability
+  maxRetries: 3,             // Retries for transient in-flight failures
+  wanderTimeoutMs: 120000,
+  // Module switches
+  safety: true, elytraAudit: true, autoRocket: true,
+  autoRocketCustomStars: false, chunkScan: true, pathfinding: true,
+  wander: true, landing: true, relocationCanDig: false,
+  // Behaviour
+  hazardCheck: null,         // (block) => boolean hazard override
+  ownerUsername: '',         // whisper log lines to this player
+  debug: false,
 }
 ```
 
-### `flight.fly(x, z, opts?)`
+### `flight.fly(x, z, opts?) → Promise`
 
-Fly to coordinates. Options override constructor options.
+- Resolves `{ phase: 'IDLE', landedAt: { x, y, z } }`.
+- Rejects with `ElytraFlightError` — **branch on `err.code`**, never message text.
+- During `CRUISE`/`DEADSTICK` it retargets the active flight and returns the
+  same pending promise. In other in-flight phases it rejects `IN_FLIGHT` and
+  does **not** change the active flight's target.
+- Retries: deterministic pre-flight failures (`NO_ENTITY`, `NO_ELYTRA`,
+  `ELYTRA_LOW`, `NO_ROCKETS`, `NO_LAUNCH_SPOT`, `PF_FAILED` — see
+  `NON_RETRYABLE` in `errors.js`) fail fast with their code. Transient
+  in-flight failures retry up to `maxRetries`, then reject
+  `RETRIES_EXHAUSTED` with the last code in `err.cause`.
 
-```js
-flight.fly(500, 500);
-flight.fly(500, 500, { mode: 'FAST', cruiseAlt: 200 });
-```
-
-### `flight.stop(reason?)`
-
-Emergency stop. Lands bot immediately.
-
-```js
-flight.stop();
-flight.stop('out of rockets');
-```
-
-### `flight.setMode(mode)`
-
-Change flight mode: `'FAST'`, `'MED'`, `'LOW'`.
-
-### `flight.setTarget(x, z)`
-
-Set target without flying.
-
-### `flight.setStatus(x, z)`
-
-Returns status object:
-```js
-{
-  phase: 'CRUISE',
-  mode: 'MED',
-  pos: { x: 100, y: 180, z: 200 },
-  target: { x: 500, z: 500 },
-  dist: 350,
-  elytra: { dur: 400, count: 2, unbreaking: 3 },
-  rockets: 20,
-  flying: true
-}
-```
-
-### `flight.preflight()`
-
-Pre-flight check without flying:
-```js
-const check = await flight.preflight();
-// { ok: true, elytra: { have: 432, need: 50 }, rockets: { have: 20, need: 8 } }
-```
-
-### `flight.isFlying`
-
-Boolean — true if elytra is active.
-
-### `flight.phase`
-
-Current phase: `IDLE`, `AUDIT`, `TAKEOFF`, `CLIMB`, `CRUISE`, `LAND`, `WANDER`, `FAILED`.
-
-## Events
-
-```js
-flight.on('phase', (phase, msg) => {});
-flight.on('stopped', (reason) => {});
-flight.on('error', (err) => {});
-```
-
-## Flight Modes
-
-| Mode | Speed | Fuel Use | Use Case |
-|------|-------|----------|----------|
-| `FAST` | 30 m/s | High | Emergency |
-| `MED` | 22 m/s | Medium | Default |
-| `LOW` | 15 m/s | Low | Long distance |
+Other methods: `stop(reason?)`, `setMode(mode)`, `setTarget(x, z)`,
+`setStatus(x, z)` (snapshot), `preflight()` (async check), `isFlying`,
+`phase`, `targetX`, `targetZ`.
 
 ## Flight Phases
 
-1. **AUDIT** — Check elytra durability and rockets
-2. **TAKEOFF** — Jump and activate elytra
-3. **CLIMB** — Ascend to cruise altitude
-4. **CRUISE** — Fly toward target
-5. **LAND** — Spiral descent to safe spot
-6. **WANDER** — Search for safe landing spot
-7. **IDLE** — Landed or stopped
-8. **FAILED** — Error occurred
+`IDLE → AUDIT → TAKEOFF → CLIMB → CRUISE → LAND → IDLE`, with `DEADSTICK`
+(out of fuel → glide), `SCAN` (wander), `RELOC`, and `FAIL` (retrying; note the
+string value of `PHASE.FAILED` is `'FAIL'`).
 
-## Helper Functions
+## Events
 
-```js
-const { countRockets, getElytraSummary } = require('@eksses/eafe');
+`phase(phase, msg)`, `stopped(reason)`, `error(err)`. The `error` event is an
+optional side-channel: emission is guarded (`listenerCount` check), so a missing
+listener never throws. The `fly()` promise rejection is the primary error path.
+Drive queue logic (deliveries, waypoints, transfers) with the `fly()` promise —
+watching for the `IDLE` phase event double-fires (IDLE is emitted on stop too).
 
-const rockets = countRockets(bot);        // Number
-const elytra = getElytraSummary(bot);     // { totalDurabilityAcrossAll, count, bestUnbreaking }
-```
+## Critical invariants (learned from real bugs — do not regress)
 
-## Common Patterns
+- **Yaw convention** (verified against mineflayer's own `bot.lookAt` and
+  mineflayer-pathfinder): `yaw = atan2(-dx, -dz)` faces `(dx, dz)`, so
+  `forward(yaw) = (-sin(yaw), -cos(yaw))` in (x, z). Mock physics must match.
+- **`_yawTo` dead zone**: within 3 m of the target column the bearing is
+  numerically unstable (jitter flips it ~180°) — hold the current heading.
+  Removing this makes the bot spin and stall above the target.
+- **Takeoff fires first**: an elytra at jump apex is already `isFlying()` with
+  zero boost, so the first `fireRocketDirect` must happen before any
+  `isFlying()` check; the fire loop polls until a rocket actually leaves
+  (yaw gate may block the first few calls).
+- **Climb fuel-out**: when `autoRocket` is on and the inventory hits 0 mid-climb,
+  hand off to a DEADSTICK glide (`startCruise({ keepPhase: true })`) instead of
+  stalling into GROUND_HIT.
+- **Landing is glide-to-goal** (aim at the spot, pitch by altitude delta) — the
+  old spiral orbit circled the target and skimmed the ground far off it.
+- **`stop()` clears real handles** (`flyLoop`, `verifyLoop`, `rocketLoop`,
+  `climbLoop`, `landLoop` + retry/sneak timeouts), emits exactly one `stopped`,
+  and rejects the pending promise with `STOPPED`.
+- **`emit('error')` must stay guarded** — a bare emit throws when no listener is
+  attached and would break every `.catch()`.
 
-### Multi-stop delivery
-```js
-const stops = [[100, 200], [300, 400], [500, 600]];
-for (const [x, z] of stops) {
-  await new Promise(resolve => {
-    flight.fly(x, z);
-    flight.once('phase', (p) => { if (p === 'IDLE') resolve(); });
-  });
-  // drop items here
-}
-```
+## Testing
 
-### Waypoint loop
-```js
-const waypoints = { base: [0, 0], farm: [500, 200] };
-let current = 'base';
-flight.fly(...waypoints[current]);
-flight.on('phase', (p) => {
-  if (p === 'IDLE') {
-    current = current === 'base' ? 'farm' : 'base';
-    flight.fly(...waypoints[current]);
-  }
-});
-```
+Zero-dependency runner (`test/run.js`) + mock mineflayer bot
+(`test/helpers/mock-bot.js`): real prismarine-world 1.21 terrain,
+`entity.velocity` in **blocks/tick**, elytra model with rocket boost decay,
+~15:1 glide (12 m/s floor, pitch-follow + induced sink), and stall when
+pointing up without a rocket.
 
-### Status monitoring
-```js
-setInterval(() => {
-  if (flight.isFlying) {
-    const s = flight.setStatus(targetX, targetZ);
-    console.log(`${s.phase} dist=${s.dist}m rkt=${s.rockets}`);
-  }
-}, 5000);
-```
+Test gotchas (all hit in practice):
+- `stepUntil(cond)` is **async — always `await` it**; an un-awaited call is a
+  truthy Promise and silently passes assertions.
+- Drive the mock until `flight._pending === null`, **not** until
+  `phase === FAILED` — the phase goes FAILED on every failed attempt while a
+  retry is pending; stopping physics then starves the retry (bot frozen on the
+  ground → spurious "jump fail" on every retry).
+- Monkey-patching `bot.step` must pass `dt` through (`bot.step = (dt) =>
+  origStep(dt)`) — dropping it makes the physics NaN.
+- Long-flight tests need enough rockets for the route (measured with the mock's
+  defaults, maxRetries=3, cruiseAlt=180: 300 m ≈ 36, 500 m ≈ 38) unless the test
+  is about running out (`safety: false`).
 
-## Error Handling
-
-```js
-flight.on('error', (err) => {
-  if (err.message.includes('no elytra')) {
-    // equip elytra
-  }
-  if (err.message.includes('out of rkt')) {
-    // restock rockets
-  }
-});
-```
+Perf guard: a 300 m flight must stay under 500k `blockAt` calls (~45k in
+practice) — terrain scans stay bounded by altitude and distance.
 
 ## Dependencies
 
-- **mineflayer** `>=4.0.0` — Minecraft bot framework (peer dependency)
-- **mineflayer-pathfinder** `^2.4.5` — Pathfinding for relocation
-- **vec3** `^0.2.0` — 3D vector math (dev dependency)
+- **mineflayer** `>=4.0.0` — peer dependency
+- **mineflayer-pathfinder** `^2.4.5` — relocation pathfinding
+- **vec3** `^0.2.0` — 3D vectors (mock + src)
+- dev: **eslint** + **@eslint/js** (flat config)
 
 ## Notes
 
-- Bot must have elytra equipped in chest slot
-- Bot must have firework rockets in inventory
-- Landing spots require 2 air blocks above + 1 block margin
-- Rockets only used for survival (stall prevention, altitude maintenance)
-- No rockets during landing or wander scan phases
+- Bot must have elytra equipped in the chest slot and rockets in inventory
+  (unless `autoRocket: false`).
+- Landing spots require air above + margin; a cactus/other hazard under the
+  target is avoided by the spot search, and a hazard touchdown relocates
+  instead of looping forever.
+- No rockets during landing; DEADSTICK is a level glide.
+- CommonJS everywhere (`"type": "commonjs"`), Node ≥ 16.

@@ -19,10 +19,8 @@ bot.once('spawn', () => {
     ownerUsername: 'Admin',
   });
 
-  flight.on('phase', (phase) => {
-    if (phase === 'IDLE' && isRescuing) {
-      processNextRescue();
-    }
+  flight.on('phase', (phase, msg) => {
+    if (msg) console.log(`[${phase}] ${msg}`);
   });
 
   flight.on('error', (err) => {
@@ -78,12 +76,12 @@ bot.once('spawn', () => {
 
     // Status
     if (args[0] === 'status') {
-      const s = flight.setStatus(flight._targetX, flight._targetZ);
+      const s = flight.setStatus(flight.targetX, flight.targetZ);
       bot.chat(`${s.phase} | ${s.pos.x},${s.pos.y},${s.pos.z} | ${s.dist}m`);
     }
   });
 
-  function processNextRescue() {
+  async function processNextRescue() {
     if (rescueQueue.length === 0) {
       isRescuing = false;
       bot.chat('All rescues complete');
@@ -94,15 +92,24 @@ bot.once('spawn', () => {
     const next = rescueQueue[0];
 
     bot.chat(`Rescuing ${next.user} at (${next.x},${next.z})...`);
-    flight.fly(next.x, next.z);
 
-    flight.once('phase', function onArrival(phase) {
-      if (phase === 'IDLE') {
-        bot.chat(`Rescued ${next.user}!`);
-        rescueQueue.shift();
-        processNextRescue();
+    // fly() promise is the single arrival/failure signal
+    try {
+      await flight.fly(next.x, next.z);
+    } catch (err) {
+      rescueQueue.shift();
+      if (err.code === 'STOPPED') {
+        bot.chat('Rescues cancelled');
+        return;
       }
-    });
+      bot.chat(`Rescue failed (${err.code}), skipping`);
+      processNextRescue();
+      return;
+    }
+
+    bot.chat(`Rescued ${next.user}!`);
+    rescueQueue.shift();
+    processNextRescue();
   }
 
   console.log('Rescue bot ready');

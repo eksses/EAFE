@@ -22,12 +22,16 @@ bot.once('spawn', () => {
   flight.on('error', (e) => console.error('Error:', e.message));
 
   // Fly with overrides
-  flight.fly(1000, -500, { mode: 'LOW', cruiseAlt: 150 });
+  flight.fly(1000, -500, { mode: 'LOW', cruiseAlt: 150 })
+    .then((res) => console.log('Landed at', res.landedAt))
+    .catch((err) => {
+      if (err.code !== 'STOPPED') console.error('Flight failed:', err.code, err.message);
+    });
 
   // Check status anytime
   setInterval(() => {
     if (flight.isFlying) {
-      const s = flight.setStatus(flight._targetX, flight._targetZ);
+      const s = flight.setStatus(flight.targetX, flight.targetZ);
       console.log(`${s.phase} pos=(${s.pos.x},${s.pos.y},${s.pos.z}) dist=${s.dist}m e=${s.elytra.dur} rkt=${s.rockets}`);
     }
   }, 5000);
