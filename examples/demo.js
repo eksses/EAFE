@@ -29,7 +29,11 @@ bot.once('spawn', () => {
     if (args[0] === 'f') {
       targetX = parseInt(args[1]) || 0;
       targetZ = parseInt(args[2]) || 0;
-      flight.fly(targetX, targetZ);
+      flight.fly(targetX, targetZ)
+        .then((res) => bot.chat(`Landed at (${res.landedAt.x},${res.landedAt.z})`))
+        .catch((err) => {
+          if (err.code !== 'STOPPED') bot.chat(`Flight failed: ${err.code}`);
+        });
       bot.chat(`Flying to ${targetX} ${targetZ}`);
     }
 

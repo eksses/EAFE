@@ -53,7 +53,11 @@ BOTS.forEach(botOpts => {
       const flight = flightInstances.get(botOpts.name);
       const target = flightTargets.get(botOpts.name);
       if (flight && target) {
-        flight.fly(target.x, target.z);
+        flight.fly(target.x, target.z)
+          .then(() => bot.chat(`Landed at (${target.x},${target.z})`))
+          .catch((err) => {
+            if (err.code !== 'STOPPED') bot.chat(`Flight failed: ${err.code}`);
+          });
         bot.chat(`Flying to (${target.x},${target.z})`);
       }
     }
@@ -71,7 +75,7 @@ BOTS.forEach(botOpts => {
     if (args[0] === 'status' && args[1] === botOpts.name) {
       const flight = flightInstances.get(botOpts.name);
       if (flight) {
-        const s = flight.setStatus(flight._targetX, flight._targetZ);
+        const s = flight.setStatus(flight.targetX, flight.targetZ);
         bot.chat(`${s.phase} | ${s.pos.x},${s.pos.y},${s.pos.z} | ${s.dist}m | rkt=${s.rockets}`);
       }
     }

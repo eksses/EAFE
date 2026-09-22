@@ -63,7 +63,7 @@ bot.once('spawn', async () => {
       flight.setMode('FAST');
       console.log('Mode set');
 
-      const status = flight.setStatus(flight._targetX, flight._targetZ);
+      const status = flight.setStatus(flight.targetX, flight.targetZ);
       console.log('Status:', status);
     }
   });

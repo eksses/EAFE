@@ -1,5 +1,5 @@
 const mineflayer = require('mineflayer');
-const { ElytraFlight, countRockets, getElytraSummary } = require('@eksses/eafe');
+const { ElytraFlight } = require('@eksses/eafe');
 
 const bot = mineflayer.createBot({
   host: 'localhost',
@@ -20,10 +20,10 @@ bot.once('spawn', async () => {
 
   // Set target without flying
   flight.setTarget(100, 200);
-  console.log('Target set to', flight._targetX, flight._targetZ);
+  console.log('Target set to', flight.targetX, flight.targetZ);
 
   // Get full status
-  const status = flight.setStatus(flight._targetX, flight._targetZ);
+  const status = flight.setStatus(flight.targetX, flight.targetZ);
   console.log('Status:', status);
 
   // Then fly
