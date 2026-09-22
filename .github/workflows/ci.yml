@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  push:
+    branches: [dev, main, master]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: lint + test (node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [18, 20, 22]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Run test suite (unit + integration, real-time mock flights)
+        run: node test/run.js
+        timeout-minutes: 10
+
+      - name: Pack dry run (verify package contents)
+        run: npm pack --dry-run

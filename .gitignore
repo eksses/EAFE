@@ -1,2 +1,5 @@
 node_modules/
 *.log
+
+# legacy monolith — kept on disk for reference, not version-controlled
+legacy/
