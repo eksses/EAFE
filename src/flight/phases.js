@@ -1,14 +1,22 @@
 'use strict';
 
-const Logger = require('../logger');
-const { isSafeSolidBlock } = require('../utils');
+const { ErrorCode } = require('../errors');
 
 function createFlightPhases(ctx) {
   const { bot, state } = ctx;
 
+  const canRocket = () => ctx.opts.autoRocket && ctx.countRockets(bot) > 0;
+
   async function startFlight() {
     if (state.phase !== ctx.PHASE.IDLE && state.phase !== ctx.PHASE.FAILED) {
-      try { bot.chat('In flight -- s to stop'); } catch(_) {}
+      // Retargeting mid-cruise is safe (the cruise loop reads the target
+      // live) — fly() handles that case before calling here.
+      try { bot.chat('In flight -- use stop to abort'); } catch (_) { /* bot gone */ }
+      return;
+    }
+
+    if (!bot.entity) {
+      ctx.failFlight(ErrorCode.NO_ENTITY, 'bot not spawned');
       return;
     }
 
@@ -21,65 +29,73 @@ function createFlightPhases(ctx) {
 
     const elytraOk = await ctx.auditAndEquipElytra();
     if (!elytraOk) {
-      ctx.setPhase(ctx.PHASE.FAILED, 'no elytra dur>15');
+      ctx.failFlight(ErrorCode.NO_ELYTRA, 'no elytra dur>15');
       return;
     }
 
-    // Check elytra durability vs distance
-    const d2d = ctx.dist2D(state.activeTargetX, state.activeTargetZ);
-    const elytraInfo = ctx.getElytraSummary(bot);
-    const reqDur = ctx.calculateRequiredElytraDurability(d2d, state.currentMode.speedMps, elytraInfo.bestUnbreaking);
+    if (ctx.opts.safety && ctx.opts.elytraAudit) {
+      const d2d = ctx.dist2D(state.activeTargetX, state.activeTargetZ);
+      const elytraInfo = ctx.getElytraSummary();
+      const reqDur = ctx.calculateRequiredElytraDurability(d2d, state.currentMode.speedMps, elytraInfo.bestUnbreaking);
 
-    Logger.debug(`e: ${elytraInfo.totalDurabilityAcrossAll}/${reqDur} ${elytraInfo.count}x U${elytraInfo.bestUnbreaking}`);
+      ctx.logger.debug(`e: ${elytraInfo.totalDurabilityAcrossAll}/${reqDur} ${elytraInfo.count}x U${elytraInfo.bestUnbreaking}`);
 
-    if (elytraInfo.totalDurabilityAcrossAll < reqDur) {
-      ctx.setPhase(ctx.PHASE.FAILED, `need ${reqDur} dur, have ${elytraInfo.totalDurabilityAcrossAll}`);
-      return;
+      if (elytraInfo.totalDurabilityAcrossAll < reqDur) {
+        ctx.failFlight(ErrorCode.ELYTRA_LOW, `need ${reqDur} dur, have ${elytraInfo.totalDurabilityAcrossAll}`);
+        return;
+      }
     }
 
-    // Check rockets
-    await ctx.autoEquipRocket(bot);
-    const rockets = ctx.countRockets(bot);
-    const startY = bot.entity.position.y;
-    const reqRkt = ctx.calculateRequiredRockets(d2d, ctx.CRUISE_ALT - startY);
+    if (ctx.opts.safety) {
+      if (ctx.opts.autoRocket) await ctx.autoEquipRocket();
+      const rockets = ctx.countRockets();
+      const startY = bot.entity.position.y;
+      const reqRkt = ctx.calculateRequiredRockets(ctx.dist2D(state.activeTargetX, state.activeTargetZ), ctx.CRUISE_ALT - startY);
 
-    Logger.debug(`rkt: ${rockets}/${reqRkt}`);
+      ctx.logger.debug(`rkt: ${rockets}/${reqRkt}`);
 
-    if (rockets < reqRkt) {
-      ctx.setPhase(ctx.PHASE.FAILED, `need ${reqRkt} rkt, have ${rockets}`);
-      return;
+      if (ctx.opts.autoRocket && rockets < reqRkt) {
+        ctx.failFlight(ErrorCode.NO_ROCKETS, `need ${reqRkt} rkt, have ${rockets}`);
+        return;
+      }
     }
 
-    Logger.debug('audit PASS');
+    ctx.logger.debug('audit PASS');
 
     // Find launch heading
     if (!state.spatialClear) {
-      let heading = ctx.spatial.findBestLaunchHeading();
-      Logger.debug(`heading: ${heading.headingName}`);
+      let heading = ctx.opts.chunkScan
+        ? ctx.spatial.findBestLaunchHeading()
+        : { yaw: ctx.yawTo(state.activeTargetX, state.activeTargetZ), headingName: 'direct', clear: true };
+      ctx.logger.debug(`heading: ${heading.headingName}`);
 
       if (!heading.clear) {
-        Logger.warn('all blocked -- pathfinding');
-        try { bot.chat('All headings blocked -- relocating'); } catch(_) {}
+        if (!ctx.opts.pathfinding) {
+          ctx.failFlight(ErrorCode.NO_LAUNCH_SPOT, 'all headings blocked (pathfinding off)');
+          return;
+        }
+
+        ctx.logger.warn('all blocked -- pathfinding');
+        try { bot.chat('All headings blocked -- relocating'); } catch (_) { /* bot gone */ }
 
         const spot = ctx.spatial.findElevatedOpenSpot();
         if (!spot) {
-          ctx.setPhase(ctx.PHASE.FAILED, 'no launch spot');
-          ctx.scheduleRetry();
+          ctx.failFlight(ErrorCode.NO_LAUNCH_SPOT, 'no launch spot');
           return;
         }
 
         ctx.setPhase(ctx.PHASE.RELOCATING, `-> (${spot.x},${spot.y},${spot.z})`);
         const arrived = await ctx.spatial.pathfindToSpot(spot.x, spot.y, spot.z);
         if (!arrived) {
-          ctx.setPhase(ctx.PHASE.FAILED, 'pf failed');
-          ctx.scheduleRetry();
+          ctx.failFlight(ErrorCode.PF_FAILED, 'pf failed');
           return;
         }
 
-        heading = ctx.spatial.findBestLaunchHeading();
+        heading = ctx.opts.chunkScan
+          ? ctx.spatial.findBestLaunchHeading()
+          : { yaw: ctx.yawTo(state.activeTargetX, state.activeTargetZ), headingName: 'direct', clear: true };
         if (!heading.clear) {
-          ctx.setPhase(ctx.PHASE.FAILED, 'still blocked');
-          ctx.scheduleRetry();
+          ctx.failFlight(ErrorCode.NO_LAUNCH_SPOT, 'still blocked');
           return;
         }
       }
@@ -95,11 +111,12 @@ function createFlightPhases(ctx) {
     if (state.phase === ctx.PHASE.FAILED) return;
     ctx.setPhase(ctx.PHASE.TAKEOFF, 'jump+elytra');
 
-    ['sprint','forward','back','left','right','sneak'].forEach(k => {
-      try { bot.setControlState(k, false); } catch(_) {}
+    ['sprint', 'forward', 'back', 'left', 'right', 'sneak'].forEach(k => {
+      try { bot.setControlState(k, false); } catch (_) { /* bot gone */ }
     });
 
-    await ctx.autoEquipRocket(bot);
+    if (ctx.opts.autoRocket) await ctx.autoEquipRocket();
+
     ctx.lookForce(state.activeLaunchYaw, 0.5);
 
     bot.setControlState('jump', true);
@@ -116,38 +133,43 @@ function createFlightPhases(ctx) {
     bot.setControlState('jump', false);
 
     if (!airborne) {
-      ctx.setPhase(ctx.PHASE.FAILED, 'jump fail');
-      ctx.scheduleRetry();
+      ctx.failFlight(ErrorCode.NO_FLIGHT_CONFIRM, 'jump fail');
       return;
     }
 
-    Logger.debug(`airborne Y=${bot.entity.position.y.toFixed(1)}`);
+    ctx.logger.debug(`airborne Y=${bot.entity.position.y.toFixed(1)}`);
 
     try {
       await bot.elytraFly();
-    } catch(e) {
-      Logger.error('elytraFly:', e.message);
-      ctx.setPhase(ctx.PHASE.FAILED, 'elytraFly fail');
-      ctx.scheduleRetry();
+    } catch (e) {
+      ctx.logger.error('elytraFly:', e.message);
+      ctx.failFlight(ErrorCode.NO_FLIGHT_CONFIRM, 'elytraFly fail');
       return;
     }
 
-    ctx.fireRocketDirect();
-
-    await ctx.sleep(200);
-    if (!ctx.isFlying()) {
-      Logger.warn('fly=false post-launch -- retry');
-      try { await bot.elytraFly(); } catch(_) {}
-      ctx.fireRocketDirect();
-      await ctx.sleep(250);
-      if (!ctx.isFlying()) {
-        ctx.setPhase(ctx.PHASE.FAILED, 'no flight confirm');
-        ctx.scheduleRetry();
-        return;
-      }
+    // Poll until a rocket actually leaves. fireRocketDirect self-gates on
+    // yaw alignment and offhand contents, so the first boost goes toward
+    // the launch heading (previously it fired immediately and could launch
+    // the bot the wrong way). Break on `fired`, NOT on isFlying: at jump
+    // apex an elytra is already "flying" (elytraFlying && !onGround) with
+    // zero boost, so breaking on isFlying skipped the first fire whenever
+    // the yaw gate blocked it (180° heading change at takeoff).
+    let fired = false;
+    let grounded = 0;
+    for (let i = 0; i < 20 && !fired; i++) {
+      fired = await ctx.fireRocketDirect(state.activeLaunchYaw);
+      if (fired) break;
+      grounded = bot.entity.onGround ? grounded + 1 : 0;
+      if (grounded > 12) break; // ~1.2 s grounded without a boost → retry loop takes over
+      await ctx.sleep(100);
     }
 
-    Logger.debug('flight OK, climb');
+    if (!ctx.isFlying()) {
+      ctx.failFlight(ErrorCode.NO_FLIGHT_CONFIRM, 'no flight confirm');
+      return;
+    }
+
+    ctx.logger.debug('flight OK, climb');
     startClimb();
   }
 
@@ -155,12 +177,11 @@ function createFlightPhases(ctx) {
     ctx.setPhase(ctx.PHASE.CLIMBING, `-> Y=${ctx.CRUISE_ALT}`);
 
     let climbTicks = 0;
-    const launchPosY = bot.entity.position.y;
 
     ctx.lookForce(state.activeLaunchYaw, 0.45);
 
     if (ctx.rocketLoop) { clearInterval(ctx.rocketLoop); ctx.rocketLoop = null; }
-    if (ctx.climbLoop) clearInterval(ctx.climbLoop);
+    if (ctx.climbLoop) { clearInterval(ctx.climbLoop); ctx.climbLoop = null; }
 
     ctx.climbLoop = setInterval(() => {
       if (state.phase !== ctx.PHASE.CLIMBING) { clearInterval(ctx.climbLoop); ctx.climbLoop = null; return; }
@@ -171,45 +192,73 @@ function createFlightPhases(ctx) {
 
       ctx.checkMidFlightElytraSwap();
 
+      // Out of fuel mid-climb: stop climbing toward altitude we can no
+      // longer buy — hand off to the cruise loops in DEADSTICK. They
+      // already run in DEADSTICK (no rockets, level glide) and steer to
+      // the goal. Without this, a 1-rocket launch burns its only boost
+      // at takeoff, stalls on the ground during climb, and dies with
+      // GROUND_HIT before ever reaching the cruise altitude where
+      // rocketLoop would have noticed the empty inventory.
+      if (ctx.opts.autoRocket && ctx.countRockets() === 0 && climbTicks > 3) {
+        clearInterval(ctx.climbLoop); ctx.climbLoop = null;
+        ctx.setPhase(ctx.PHASE.DEAD_STICK, 'out of rkt');
+        startCruise({ keepPhase: true });
+        return;
+      }
+
       // Track safe ground
-      const groundUnder = ctx.spatial.getGroundBlockAt(Math.round(pos.x), Math.round(pos.z));
-      if (groundUnder && isSafeSolidBlock(groundUnder)) {
-        state.lastKnownSafeGround = { x: Math.round(pos.x), y: Math.round(pos.y), z: Math.round(pos.z), blockName: groundUnder.name };
+      const groundUnder = ctx.spatial.getGroundBlockAt(Math.round(pos.x), Math.round(pos.z), pos.y + 10);
+      if (groundUnder && ctx.isSafeSolid(groundUnder)) {
+        state.lastKnownSafeGround = { x: Math.round(pos.x), y: groundUnder.position?.y ?? Math.round(pos.y), z: Math.round(pos.z), blockName: groundUnder.name };
       }
 
-      // Yaw toward target after Y=95
-      const currentYaw = pos.y >= 95 ? targetYaw : state.activeLaunchYaw;
-
-      // Pitch: steeper if terrain ahead
+      // Terrain scan with the current heading
       let pitch = climbTicks <= 4 ? 0.45 : 0.65;
-      const scan = ctx.spatial.scanFullRenderDistance(currentYaw, pitch);
-      if (scan.hit) {
-        if (Date.now() - state.lastTerrainWarn > 3000) {
-          Logger.warn(`terrain ${scan.block} d=${scan.dist}m -- climb steep`);
-          state.lastTerrainWarn = Date.now();
+      let terrainAhead = false;
+      if (ctx.opts.chunkScan) {
+        const currentYaw = pos.y >= 95 ? targetYaw : state.activeLaunchYaw;
+        const scan = ctx.spatial.scanFullRenderDistance(currentYaw, pitch);
+        terrainAhead = scan.hit;
+        if (scan.hit) {
+          if (Date.now() - state.lastTerrainWarn > 3000) {
+            ctx.logger.warn(`terrain ${scan.block} d=${scan.dist}m -- climb steep`);
+            state.lastTerrainWarn = Date.now();
+          }
+          pitch = 0.75;
         }
-        pitch = 0.75;
       }
+
+      // Turn toward the target once high enough — or immediately when the
+      // way is clear, instead of holding a detour heading until Y=95.
+      const currentYaw = (pos.y >= 95 || !terrainAhead) ? targetYaw : state.activeLaunchYaw;
 
       // Rockets: only when slow and 2s+ since last
       const speed = Math.hypot(bot.entity.velocity.x, bot.entity.velocity.y, bot.entity.velocity.z);
-      if (speed < 0.65 && Date.now() - ctx.getBoostTime() > 2000 && ctx.countRockets(bot) > 0) {
+      if (ctx.opts.autoRocket && speed < 0.65 && Date.now() - ctx.getBoostTime() > 2000 && canRocket()) {
         ctx.fireRocketDirect(currentYaw);
       }
 
       ctx.lookForce(currentYaw, pitch);
 
-      // Ground hit during climb
-      if (bot.entity.onGround && pos.y < ctx.CRUISE_ALT - 10 && climbTicks > 5 && pos.y < launchPosY - 2) {
+      // Any sustained ground contact during climb = failure (covers the old
+      // "fell below launch point" case AND the ledge-stuck case where the
+      // bot sat at Y just under cruise altitude forever).
+      if (bot.entity.onGround && climbTicks > 10 && !ctx.isFlying()) {
         clearInterval(ctx.climbLoop); ctx.climbLoop = null;
-        ctx.setPhase(ctx.PHASE.FAILED, 'ground hit climb');
-        ctx.scheduleRetry();
+        ctx.failFlight(ErrorCode.GROUND_HIT, `ground hit climb Y=${Math.round(pos.y)}`);
+        return;
+      }
+
+      // Hard climb timeout (90s) as a safety net
+      if (climbTicks > 450) {
+        clearInterval(ctx.climbLoop); ctx.climbLoop = null;
+        ctx.failFlight(ErrorCode.CLIMB_TIMEOUT, `stuck at Y=${Math.round(pos.y)}`);
         return;
       }
 
       // Lost flight
       if (!ctx.isFlying() && !bot.entity.onGround) {
-        Logger.warn('fly=false mid-climb');
+        ctx.logger.warn('fly=false mid-climb');
         bot.elytraFly().catch(() => {});
         return;
       }
@@ -222,14 +271,16 @@ function createFlightPhases(ctx) {
     }, 200);
   }
 
-  function startCruise() {
-    ctx.setPhase(ctx.PHASE.CRUISING, `-> (${state.activeTargetX},?,${state.activeTargetZ}) [${state.currentMode.name}]`);
+  function startCruise(opts = {}) {
+    if (!opts.keepPhase) {
+      ctx.setPhase(ctx.PHASE.CRUISING, `-> (${state.activeTargetX},?,${state.activeTargetZ}) [${state.currentMode.name}]`);
+    }
 
     // Rocket check loop — 3s interval
     if (ctx.rocketLoop) clearInterval(ctx.rocketLoop);
     ctx.rocketLoop = setInterval(() => {
       if (state.phase !== ctx.PHASE.CRUISING && state.phase !== ctx.PHASE.DEAD_STICK) { clearInterval(ctx.rocketLoop); ctx.rocketLoop = null; return; }
-      if (ctx.countRockets(bot) === 0 && state.phase !== ctx.PHASE.DEAD_STICK) {
+      if (ctx.opts.autoRocket && ctx.countRockets() === 0 && state.phase !== ctx.PHASE.DEAD_STICK) {
         ctx.setPhase(ctx.PHASE.DEAD_STICK, 'out of rkt');
       }
     }, 3000);
@@ -243,65 +294,91 @@ function createFlightPhases(ctx) {
       ctx.checkMidFlightElytraSwap();
 
       // Track safe ground
-      const groundUnder = ctx.spatial.getGroundBlockAt(Math.round(pos.x), Math.round(pos.z));
-      if (groundUnder && isSafeSolidBlock(groundUnder)) {
-        state.lastKnownSafeGround = { x: Math.round(pos.x), y: Math.round(pos.y), z: Math.round(pos.z), blockName: groundUnder.name };
+      const groundUnder = ctx.spatial.getGroundBlockAt(Math.round(pos.x), Math.round(pos.z), pos.y + 10);
+      if (groundUnder && ctx.isSafeSolid(groundUnder)) {
+        state.lastKnownSafeGround = { x: Math.round(pos.x), y: groundUnder.position?.y ?? Math.round(pos.y), z: Math.round(pos.z), blockName: groundUnder.name };
       }
 
       const d = ctx.dist2D(state.activeTargetX, state.activeTargetZ);
-      const groundY = ctx.spatial.getGroundBlockAt(state.activeTargetX, state.activeTargetZ)?.position?.y ?? 60;
-      const dV = pos.y - groundY;
+
+      // Ground height under the target (scan only near the bot's altitude —
+      // a full 320-deep scan twice per 50ms tick was pure waste).
+      const groundY = ctx.spatial.getGroundBlockAt(state.activeTargetX, state.activeTargetZ, pos.y + 30)?.position?.y ?? 60;
+      const dV = Math.max(0, pos.y - groundY);
+
+      // ── Approach geometry ──
+      // Descent starts far enough out that the elytra's glide ratio can bring
+      // the bot to dV<60 before it reaches the target. (The old "start
+      // descending within 100m" rule made the trigger `d<40 && dV<50`
+      // unreachable: the bot flew past the target still 90+ blocks up.)
+      const descentStart = Math.max(100, (dV - 50) * 2.1 + 60);
+      const inDescent = d < descentStart;
+      const lowEnough = dV < 60;
 
       // Landing trigger
-      if (d < 40 && dV < 50) {
+      if (lowEnough && inDescent) {
         clearInterval(ctx.flyLoop); ctx.flyLoop = null;
         clearInterval(ctx.rocketLoop); ctx.rocketLoop = null;
-        clearInterval(ctx.verifyLoop); ctx.verifyLoop = null;
+        if (ctx.verifyLoop) { clearInterval(ctx.verifyLoop); ctx.verifyLoop = null; }
+
+        if (!ctx.opts.landing) {
+          // No spot search — dive straight at the target column
+          ctx.startLanding({ skipSpotSearch: true });
+          return;
+        }
 
         const spot = ctx.wander.findSafeLandingSpotAround(state.activeTargetX, state.activeTargetZ);
         if (spot.safe) {
-          ctx.startLanding();
-        } else {
-          Logger.info(`no spot at (${state.activeTargetX},${state.activeTargetZ}) -- wander`);
+          ctx.startLanding({ spot });
+        } else if (ctx.opts.wander) {
+          ctx.logger.info(`no spot at (${state.activeTargetX},${state.activeTargetZ}) -- wander`);
           ctx.startWanderScan();
+        } else {
+          ctx.failFlight(ErrorCode.NO_SAFE_SPOT, 'no landing spot (wander off)');
         }
         return;
       }
 
-      // Cruise pitch
+      // Cruise / descent pitch
       const yaw = ctx.yawTo(state.activeTargetX, state.activeTargetZ);
-      const timeSinceBoost = Date.now() - ctx.getBoostTime();
-      let pitch = state.phase === ctx.PHASE.DEAD_STICK ? 0.02 : state.currentMode.pitch;
+      let pitch;
 
-      if (state.phase === ctx.PHASE.CRUISING) {
-        pitch = timeSinceBoost < 1000 ? 0.15 : -0.04;
+      if (inDescent) {
+        // Steady ~26° dive; no rockets — gravity does the work and the
+        // dive builds speed on its own.
+        pitch = -0.45;
+      } else {
+        const timeSinceBoost = Date.now() - ctx.getBoostTime();
+        pitch = state.phase === ctx.PHASE.DEAD_STICK ? 0.02 : state.currentMode.pitch;
+        if (state.phase === ctx.PHASE.CRUISING) {
+          pitch = timeSinceBoost < 1000 ? 0.15 : -0.04;
 
-        if (d < 100 && dV > 50) pitch = -0.20;
-        else if (d < 60 && dV > 30) pitch = -0.12;
-
-        // Rockets: below cruise alt AND far from target
-        if (pos.y < ctx.CRUISE_ALT && d > 100) {
-          ctx.smartFireRocket();
+          // Rockets: below cruise alt AND far from target
+          if (ctx.opts.autoRocket && pos.y < ctx.CRUISE_ALT && d > 100) {
+            ctx.smartFireRocket();
+          }
         }
       }
 
       // Terrain avoidance
-      const scan = ctx.spatial.scanFullRenderDistance(yaw, pitch);
-      if (scan.hit && scan.dist < 60) {
-        if (Date.now() - state.lastTerrainWarn > 3000) {
-          Logger.warn(`terrain ${scan.block} d=${scan.dist}m -- over`);
-          state.lastTerrainWarn = Date.now();
+      if (ctx.opts.chunkScan) {
+        const scan = ctx.spatial.scanFullRenderDistance(yaw, pitch);
+        if (scan.hit && scan.dist < 60) {
+          if (Date.now() - state.lastTerrainWarn > 3000) {
+            ctx.logger.warn(`terrain ${scan.block} d=${scan.dist}m -- over`);
+            state.lastTerrainWarn = Date.now();
+          }
+          pitch = 0.55;
+          if (ctx.opts.autoRocket && canRocket()) ctx.fireRocketDirect(yaw);
         }
-        pitch = 0.55;
-        if (ctx.countRockets(bot) > 0) ctx.fireRocketDirect(yaw);
       }
 
       // Stall recovery
       const speed = Math.hypot(bot.entity.velocity.x, bot.entity.velocity.y, bot.entity.velocity.z);
       if (speed < 0.05 && pos.y > 60) {
-        Logger.warn('stall -- 180 boost');
+        ctx.logger.warn('stall -- 180 boost');
         ctx.lookForce(yaw + Math.PI, 0.70);
-        ctx.fireRocketDirect();
+        if (ctx.opts.autoRocket) ctx.fireRocketDirect();
         return;
       }
 
@@ -316,27 +393,26 @@ function createFlightPhases(ctx) {
       if (state.phase !== ctx.PHASE.CRUISING && state.phase !== ctx.PHASE.DEAD_STICK) { clearInterval(ctx.verifyLoop); ctx.verifyLoop = null; return; }
 
       const curDist = ctx.dist2D(state.activeTargetX, state.activeTargetZ);
+      const prevDist = lastDist;
+      lastDist = curDist;
       const targetYaw = ctx.yawTo(state.activeTargetX, state.activeTargetZ);
 
-      if (curDist > lastDist + 5) {
-        Logger.warn(`drift ${lastDist.toFixed(0)}->${curDist.toFixed(0)}m -- realign`);
+      if (curDist > prevDist + 5) {
+        ctx.logger.warn(`drift -- realign`);
         ctx.lookForce(targetYaw, state.currentMode.pitch);
       }
 
       if (!ctx.isFlying() && !bot.entity.onGround) {
-        Logger.warn('fly=false cruise -- recover');
+        ctx.logger.warn('fly=false cruise -- recover');
         ctx.auditAndEquipElytra().then(() => {
           if (state.phase !== ctx.PHASE.CRUISING && state.phase !== ctx.PHASE.DEAD_STICK) return;
           bot.elytraFly().catch(e => {
-            ctx.setPhase(ctx.PHASE.FAILED, 'lost flight: ' + e.message);
-            ctx.scheduleRetry();
+            ctx.failFlight(ErrorCode.LOST_FLIGHT, 'lost flight: ' + e.message);
           });
-          if (ctx.countRockets(bot) > 0) ctx.fireRocketDirect(targetYaw);
+          if (ctx.opts.autoRocket && canRocket()) ctx.fireRocketDirect(targetYaw);
         });
         return;
       }
-
-      lastDist = curDist;
     }, 2000);
   }
 

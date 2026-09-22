@@ -1,5 +1,15 @@
 'use strict';
 
+/**
+ * Flight modes.
+ *
+ * speedMps         — expected average ground speed (m/s) used for planning.
+ * pitch            — steady cruise pitch (radians, negative = descending).
+ * speedGate        — fire a rocket when speed drops below this (blocks/tick,
+ *                    1 block/tick = 20 m/s).
+ * fuelDistDivider  — horizontal meters of flight covered per rocket when
+ *                    estimating fuel (lower = more rockets budgeted).
+ */
 const MODES = {
   FAST: {
     name: 'FAST',
@@ -27,6 +37,10 @@ const MODES = {
   },
 };
 
+// Documented aliases so 'MED' / 'LOW' resolve (previously fell back to MED silently).
+MODES.MED = MODES.MEDIUM;
+MODES.LOW = MODES.EFFICIENT;
+
 const PHASE = {
   IDLE: 'IDLE',
   AUDIT: 'AUDIT',
@@ -40,6 +54,7 @@ const PHASE = {
   FAILED: 'FAIL',
 };
 
+/** Surfaces the bot must not land on / fly through. Exact names only. */
 const HAZARD_SURFACES = new Set([
   'water', 'flowing_water', 'lava', 'flowing_lava', 'magma_block',
   'fire', 'soul_fire', 'sweet_berry_bush', 'cactus', 'powder_snow',

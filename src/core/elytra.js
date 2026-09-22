@@ -2,29 +2,53 @@
 
 const Logger = require('../logger');
 
+/**
+ * Detect Unbreaking level across mineflayer item shapes:
+ *  - pre-1.20.5:  item.enchants = [{ name: 'unbreaking', lvl: 3 }]
+ *  - 1.20.5+:     item.enchants = [{ id: 'minecraft:unbreaking', lvl: 3 }] (item components)
+ *  - raw NBT:     item.nbt.value.Enchantments.value.value = [{ id: 34, lvl: 3 }]
+ */
 function getUnbreakingLevel(item) {
   if (!item) return 0;
-  if (item.enchants && Array.isArray(item.enchants)) {
-    const u = item.enchants.find(e => e.name === 'unbreaking' || e.name === 'durability');
+
+  const enchs = item.enchants;
+  if (Array.isArray(enchs)) {
+    const u = enchs.find(e =>
+      e.name === 'unbreaking' || e.name === 'durability' ||
+      e.id === 'minecraft:unbreaking' || e.id === 'unbreaking' || e.id === 34
+    );
     if (u) return u.lvl ?? 1;
   }
+
   try {
-    const enchs = item.nbt?.value?.Enchantments?.value?.value || item.nbt?.value?.ench?.value?.value;
-    if (enchs && Array.isArray(enchs)) {
-      const u = enchs.find(e => e.id?.value === 'unbreaking' || e.id?.value === 34);
-      if (u) return u.lvl?.value ?? 1;
+    const raw = item.nbt?.value?.Enchantments?.value?.value;
+    if (raw && Array.isArray(raw)) {
+      const u = raw.find(e => {
+        const id = e.id?.value ?? e.id;
+        return id === 34 || id === 'unbreaking' || id === 'minecraft:unbreaking';
+      });
+      if (u) {
+        const lvl = u.lvl?.value ?? u.lvl;
+        return Number(lvl) || 1;
+      }
     }
-  } catch(_) {}
+  } catch (_) { /* NBT shape varies by version — fall through */ }
+
   return 0;
 }
 
+/**
+ * Expected elytra durability loss per second of flight.
+ *
+ * Unbreaking n deals damage with probability 2/(n+3) (no damage with
+ * probability (n+1)/(n+3)), so the expected rate is `2 / (n + 3)`:
+ *   unenchanted 1.0, U1 0.5, U2 0.4, U3 ~0.333, U4 ~0.286 ...
+ * (The old 1/(n+1) table under-estimated U3 by 25% — preflight could pass
+ * while the elytra broke mid-flight.)
+ */
 function getElytraDamageRate(unbreakingLvl) {
-  switch (unbreakingLvl) {
-    case 1: return 0.50;
-    case 2: return 0.333;
-    case 3: return 0.25;
-    default: return 1.0;
-  }
+  if (!unbreakingLvl || unbreakingLvl < 1) return 1.0;
+  return 2 / (unbreakingLvl + 3);
 }
 
 function calculateRequiredElytraDurability(d2d, speedMps, unbreakingLvl) {
@@ -67,7 +91,18 @@ function getElytraSummary(bot) {
   return { count, equippedDur, maxDur, totalDurabilityAcrossAll, bestUnbreaking };
 }
 
-async function auditAndEquipElytra(ctx) {
+/**
+ * Ensure the chest slot holds the best elytra.
+ *
+ * @param {object} ctx  flight context (needs bot, safeChat, logger)
+ * @param {object} [options]
+ * @param {boolean} [options.equip=true]  actually swap items. Pass false for a
+ *        pure "check" (used by preflight()).
+ * @returns {Promise<boolean>} true when an elytra with durability > 10 is (or
+ *        will be) equipped.
+ */
+async function auditAndEquipElytra(ctx, options = {}) {
+  const { equip = true } = options;
   const { bot } = ctx;
   const chest = bot.inventory.slots[6];
   let currentEquippedDur = -1;
@@ -98,13 +133,15 @@ async function auditAndEquipElytra(ctx) {
     return false;
   }
 
+  if (!equip) return true; // check-only: a good spare exists
+
   const spareItem = bot.inventory.slots[bestSlot];
   try {
     await bot.equip(spareItem, 'torso');
     Logger.info(`elytra swap slot${bestSlot} dur=${bestDur}/432 (was ${currentEquippedDur})`);
     ctx.safeChat(`Elytra swapped (${bestDur}/432)`);
     return true;
-  } catch(e) {
+  } catch (e) {
     Logger.error('equip elytra fail:', e.message);
     return false;
   }

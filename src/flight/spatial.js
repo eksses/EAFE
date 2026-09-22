@@ -1,15 +1,22 @@
 'use strict';
 
 const { Vec3 } = require('vec3');
-const { Movements, goals: { GoalBlock } } = require('mineflayer-pathfinder');
-const Logger = require('../logger');
-const { isAir, isHazardousBlock, isSafeSolidBlock } = require('../utils');
+const { Movements, goals: { GoalNear } } = require('mineflayer-pathfinder');
+const { isAir } = require('../utils');
 
 function createSpatialEngine(ctx) {
   const { bot } = ctx;
 
-  function getServerRenderDistance() {
-    if (!bot.entity || !bot.world) return { chunks: 6, blocks: 96, scanAlt: 120 };
+  // ── Render distance (cached — iterating every loaded column on each 50ms
+  //    raycast tick was a steady GC/CPU drain on large worlds) ──
+  let rdistCache = null;
+  let rdistCacheTime = 0;
+  const RDIST_CACHE_MS = 5000;
+
+  function getServerRenderDistance(force = false) {
+    if (!force && rdistCache && Date.now() - rdistCacheTime < RDIST_CACHE_MS) return rdistCache;
+
+    if (!bot.entity || !bot.world) return { chunks: 6, blocks: 96 };
 
     const bX = Math.floor(bot.entity.position.x) >> 4;
     const bZ = Math.floor(bot.entity.position.z) >> 4;
@@ -24,20 +31,23 @@ function createSpatialEngine(ctx) {
         const dist = Math.max(dx, dz);
         if (dist > maxDistChunks) maxDistChunks = dist;
       }
-    } catch(_) {}
+    } catch (_) { /* world not ready */ }
 
-    const chunks = Math.min(Math.max(maxDistChunks, 4), 16);
-    const blocks = chunks * 16;
-    const scanAlt = Math.min(Math.max(Math.round(60 + blocks * 0.6), 90), 160);
-
-    return { chunks, blocks, scanAlt };
+    rdistCache = { chunks: Math.min(Math.max(maxDistChunks, 4), 16) };
+    rdistCache.blocks = rdistCache.chunks * 16;
+    rdistCacheTime = Date.now();
+    return rdistCache;
   }
 
+  /**
+   * Raycast from the eye along (yaw, pitch).
+   * 1-block steps within 40 m (thin structures can no longer be tunneled
+   * through), 2-block steps beyond.
+   */
   function scanFullRenderDistance(yaw, currentPitch) {
     const pos = bot.entity.position;
     const eyePos = pos.offset(0, 1.6, 0);
-    const rDist = getServerRenderDistance();
-    const maxRaycastBlocks = rDist.blocks;
+    const maxRaycastBlocks = getServerRenderDistance().blocks;
 
     const cosPitch = Math.cos(currentPitch);
     const sinPitch = Math.sin(currentPitch);
@@ -45,10 +55,10 @@ function createSpatialEngine(ctx) {
     const dirY = sinPitch;
     const dirZ = Math.cos(yaw) * cosPitch;
 
-    for (let d = 1; d <= maxRaycastBlocks; d += 2) {
+    for (let d = 1; d <= maxRaycastBlocks; d += d <= 40 ? 1 : 2) {
       const checkPos = eyePos.offset(dirX * d, dirY * d, dirZ * d);
       const b = bot.blockAt(checkPos);
-      if (b && !isAir(b) && !isHazardousBlock(b)) {
+      if (b && !isAir(b) && !ctx.isHazardous(b)) {
         return { hit: true, dist: d, block: b.name, pos: checkPos };
       }
     }
@@ -56,6 +66,10 @@ function createSpatialEngine(ctx) {
     return { hit: false, dist: maxRaycastBlocks, block: null, pos: null };
   }
 
+  /**
+   * Check the launch corridor: 5 blocks overhead and 16 blocks ahead at foot
+   * and head level. Returns { clear, reason }.
+   */
   function checkRunwayDirection(testYaw) {
     const pos = bot.entity.position;
 
@@ -67,20 +81,36 @@ function createSpatialEngine(ctx) {
     const dirX = -Math.sin(testYaw);
     const dirZ = Math.cos(testYaw);
 
-    for (let d = 1; d <= 4; d++) {
+    for (let d = 1; d <= 16; d++) {
       for (let dy = 1; dy <= 2; dy++) {
-        const bPos = pos.offset(Math.round(dirX * d), dy, Math.round(dirZ * d));
+        const bPos = pos.offset(dirX * d, dy, dirZ * d);
         const b = bot.blockAt(bPos);
         if (!isAir(b)) return { clear: false, reason: `ahead ${d}m Y+${dy} ${b?.name}` };
       }
     }
 
     const blockUnder = bot.blockAt(pos.offset(0, -0.5, 0));
-    if (isHazardousBlock(blockUnder)) return { clear: false, reason: `liquid ${blockUnder?.name}` };
+    if (ctx.isHazardous(blockUnder)) return { clear: false, reason: `liquid ${blockUnder?.name}` };
 
     return { clear: true, reason: 'clear' };
   }
 
+  const COMPASS = [
+    { name: 'S', yaw: 0 },
+    { name: 'E', yaw: -Math.PI / 2 },
+    { name: 'N', yaw: Math.PI },
+    { name: 'W', yaw: Math.PI / 2 },
+    { name: 'SE', yaw: -Math.PI / 4 },
+    { name: 'NE', yaw: -3 * Math.PI / 4 },
+    { name: 'SW', yaw: Math.PI / 4 },
+    { name: 'NW', yaw: 3 * Math.PI / 4 },
+  ];
+
+  /**
+   * Pick the best clear launch heading, preferring directions closest to the
+   * target (the old code always tried W, N, E, S first and could launch the
+   * bot 90-180 degrees away from where it was going).
+   */
   function findBestLaunchHeading() {
     const targetYaw = ctx.yawTo(ctx.state.activeTargetX, ctx.state.activeTargetZ);
     const targetCheck = checkRunwayDirection(targetYaw);
@@ -88,21 +118,13 @@ function createSpatialEngine(ctx) {
       return { yaw: targetYaw, headingName: 'direct', clear: true };
     }
 
-    const COMPASS = [
-      { name: 'W', yaw: Math.PI / 2 },
-      { name: 'N', yaw: Math.PI },
-      { name: 'E', yaw: -Math.PI / 2 },
-      { name: 'S', yaw: 0 },
-      { name: 'NW', yaw: 3 * Math.PI / 4 },
-      { name: 'SW', yaw: Math.PI / 4 },
-      { name: 'NE', yaw: -3 * Math.PI / 4 },
-      { name: 'SE', yaw: -Math.PI / 4 },
-    ];
+    const ordered = [...COMPASS]
+      .map(dir => ({ ...dir, diff: Math.abs(((dir.yaw - targetYaw) % (2 * Math.PI) + 3 * Math.PI) % (2 * Math.PI) - Math.PI) }))
+      .sort((a, b) => a.diff - b.diff);
 
-    for (const dir of COMPASS) {
-      const check = checkRunwayDirection(dir.yaw);
-      if (check.clear) {
-        try { bot.chat(`Target blocked -- heading ${dir.name}`); } catch(_) {}
+    for (const dir of ordered) {
+      if (checkRunwayDirection(dir.yaw).clear) {
+        ctx.logger.warn(`target blocked -- heading ${dir.name}`);
         return { yaw: dir.yaw, headingName: dir.name, clear: true };
       }
     }
@@ -123,7 +145,9 @@ function createSpatialEngine(ctx) {
         let groundBlock = null;
         let groundY = null;
 
-        for (let dy = 1; dy >= -4; dy--) {
+        // Look a few blocks up as well — the old code only checked down and
+        // could "arrive" at the base of a wall it could never launch from.
+        for (let dy = 4; dy >= -4; dy--) {
           const b = bot.blockAt(new Vec3(cx, baseY + dy, cz));
           if (b && !isAir(b)) {
             groundBlock = b;
@@ -132,7 +156,7 @@ function createSpatialEngine(ctx) {
           }
         }
 
-        if (!groundBlock || !isSafeSolidBlock(groundBlock)) continue;
+        if (!groundBlock || !ctx.isSafeSolid(groundBlock)) continue;
 
         let openAir = 0;
         for (let dy = 0; dy < 15; dy++) {
@@ -153,18 +177,33 @@ function createSpatialEngine(ctx) {
     return best;
   }
 
+  /**
+   * Pathfind to a launch spot. Refuses gracefully when the pathfinder plugin
+   * is unavailable. Digging is OFF by default (old code tunneled through
+   * players' builds); opt in with `relocationCanDig: true`.
+   */
   async function pathfindToSpot(tx, ty, tz) {
-    Logger.debug(`pf -> (${tx},${ty},${tz})`);
+    ctx.logger.debug(`pf -> (${tx},${ty},${tz})`);
+
+    if (!bot.pathfinder) {
+      ctx.logger.warn('pathfinder plugin unavailable -- cannot relocate');
+      return false;
+    }
 
     const defaultMove = new Movements(bot);
-    defaultMove.canDig = true;
-    defaultMove.allow1by1tunnels = true;
+    defaultMove.canDig = Boolean(ctx.opts.relocationCanDig);
+    defaultMove.allow1by1tunnels = Boolean(ctx.opts.relocationCanDig);
     defaultMove.allowParkour = true;
     defaultMove.canSwim = false;
     defaultMove.liquidCost = 100;
 
-    bot.pathfinder.setMovements(defaultMove);
-    bot.pathfinder.setGoal(new GoalBlock(tx, ty, tz));
+    try {
+      bot.pathfinder.setMovements(defaultMove);
+      bot.pathfinder.setGoal(new GoalNear(tx, ty, tz, 2));
+    } catch (e) {
+      ctx.logger.warn('pathfinder goal fail:', e.message);
+      return false;
+    }
 
     const TIMEOUT = 15_000;
     const start = Date.now();
@@ -176,23 +215,29 @@ function createSpatialEngine(ctx) {
         if (dist <= 1.5 || !bot.pathfinder.isMoving()) {
           clearInterval(checkGoal);
           bot.pathfinder.stop();
-          Logger.debug(`pf done d=${dist.toFixed(1)}m`);
+          ctx.logger.debug(`pf done d=${dist.toFixed(1)}m`);
           resolve(dist <= 2.5);
+          return;
         }
         if (Date.now() - start > TIMEOUT) {
           clearInterval(checkGoal);
           bot.pathfinder.stop();
-          Logger.warn('pf timeout');
+          ctx.logger.warn('pf timeout');
           resolve(false);
         }
       }, 200);
     });
   }
 
-  function getGroundBlockAt(x, z) {
-    for (let y = 256; y >= 0; y--) {
+  /**
+   * Topmost collision block at (x, z), scanning DOWN from `maxY` (default
+   * 256). Pass the bot's altitude to skip the hundreds of calls spent in the
+   * sky every tick.
+   */
+  function getGroundBlockAt(x, z, maxY = 256) {
+    for (let y = Math.min(Math.floor(maxY), 320); y >= 0; y--) {
       const b = bot.blockAt(new Vec3(x, y, z));
-      if (b && !isAir(b)) return b;
+      if (b && !isAir(b) && b.boundingBox !== 'empty' && b.shapes && b.shapes.length > 0) return b;
     }
     return null;
   }
